@@ -1,0 +1,19 @@
+diff --git a/lib/raop_ntp.c b/lib/raop_ntp.c
+index 1dd8489..4e8c4bd 100644
+--- a/lib/raop_ntp.c
++++ b/lib/raop_ntp.c
+@@ -613,8 +613,14 @@ raop_ntp_thread(void *arg) {
+                               (struct sockaddr *) &raop_ntp->remote_saddr, raop_ntp->remote_saddr_len);
+         if (send_len < 0) {
+             int sock_err = SOCKET_GET_ERROR();
++            char peer[128] = {0};
++            char port[16] = {0};
++            getnameinfo((struct sockaddr *) &raop_ntp->remote_saddr, raop_ntp->remote_saddr_len,
++                        peer, sizeof(peer), port, sizeof(port), NI_NUMERICHOST | NI_NUMERICSERV);
+             logger_log(raop_ntp->logger, LOGGER_ERR, "raop_ntp error sending request. Error %d:%s",
+                      sock_err, SOCKET_ERROR_STRING(sock_err));
++            logger_log(raop_ntp->logger, LOGGER_ERR, "raop_ntp destination [%s]:%s (family %d)",
++                       peer, port, ((struct sockaddr *) &raop_ntp->remote_saddr)->sa_family);
+         } else {
+             ntpcount++;
+             int pos = raop_ntp->data_index;

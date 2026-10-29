@@ -1,0 +1,83 @@
+{
+  "schema_version": 1,
+  "id": "8abd8cab184b587ba573bb42da979837",
+  "name": "iPhone 九点格式示例（使用前重新录制）",
+  "device": {
+    "name": "我的 iPhone",
+    "family": "iphone",
+    "connector": "usb-c",
+    "orientation": "portrait",
+    "width": 390,
+    "height": 844
+  },
+  "steps": [
+    {
+      "do": "tap",
+      "x": 0.15,
+      "y": 0.2,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.5,
+      "y": 0.2,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.85,
+      "y": 0.2,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.15,
+      "y": 0.5,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.5,
+      "y": 0.5,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.85,
+      "y": 0.5,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.15,
+      "y": 0.8,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.5,
+      "y": 0.8,
+      "wait_ms": 1000,
+      "source_index": null
+    },
+    {
+      "do": "tap",
+      "x": 0.85,
+      "y": 0.8,
+      "wait_ms": 1000,
+      "source_index": null
+    }
+  ],
+  "loops": 1,
+  "startup_ms": 10000,
+  "settle_ms": 350,
+  "press_ms": 60,
+  "release_ms": 90
+}

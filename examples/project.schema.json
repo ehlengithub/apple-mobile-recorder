@@ -1,0 +1,184 @@
+{
+  "$defs": {
+    "DeviceProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 80,
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "family": {
+          "enum": [
+            "iphone",
+            "ipad",
+            "other-apple"
+          ],
+          "title": "Family",
+          "type": "string"
+        },
+        "connector": {
+          "default": "usb-c",
+          "enum": [
+            "usb-c",
+            "lightning"
+          ],
+          "title": "Connector",
+          "type": "string"
+        },
+        "orientation": {
+          "default": "portrait",
+          "enum": [
+            "portrait",
+            "landscape"
+          ],
+          "title": "Orientation",
+          "type": "string"
+        },
+        "width": {
+          "maximum": 8192,
+          "minimum": 100,
+          "title": "Width",
+          "type": "integer"
+        },
+        "height": {
+          "maximum": 8192,
+          "minimum": 100,
+          "title": "Height",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "name",
+        "family",
+        "width",
+        "height"
+      ],
+      "title": "DeviceProfile",
+      "type": "object"
+    },
+    "TapStep": {
+      "additionalProperties": false,
+      "properties": {
+        "do": {
+          "const": "tap",
+          "default": "tap",
+          "title": "Do",
+          "type": "string"
+        },
+        "x": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "X",
+          "type": "number"
+        },
+        "y": {
+          "maximum": 1,
+          "minimum": 0,
+          "title": "Y",
+          "type": "number"
+        },
+        "wait_ms": {
+          "maximum": 3600000,
+          "minimum": 500,
+          "title": "Wait Ms",
+          "type": "integer"
+        },
+        "source_index": {
+          "anyOf": [
+            {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Source Index"
+        }
+      },
+      "required": [
+        "x",
+        "y",
+        "wait_ms"
+      ],
+      "title": "TapStep",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": {
+      "const": 1,
+      "default": 1,
+      "title": "Schema Version",
+      "type": "integer"
+    },
+    "id": {
+      "pattern": "^[a-f0-9]{32}$",
+      "title": "Id",
+      "type": "string"
+    },
+    "name": {
+      "maxLength": 80,
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "device": {
+      "$ref": "#/$defs/DeviceProfile"
+    },
+    "steps": {
+      "items": {
+        "$ref": "#/$defs/TapStep"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "title": "Steps",
+      "type": "array"
+    },
+    "loops": {
+      "default": 1,
+      "maximum": 100000,
+      "minimum": 0,
+      "title": "Loops",
+      "type": "integer"
+    },
+    "startup_ms": {
+      "default": 10000,
+      "maximum": 60000,
+      "minimum": 3000,
+      "title": "Startup Ms",
+      "type": "integer"
+    },
+    "settle_ms": {
+      "const": 350,
+      "default": 350,
+      "title": "Settle Ms",
+      "type": "integer"
+    },
+    "press_ms": {
+      "const": 60,
+      "default": 60,
+      "title": "Press Ms",
+      "type": "integer"
+    },
+    "release_ms": {
+      "default": 90,
+      "maximum": 1000,
+      "minimum": 90,
+      "title": "Release Ms",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "name",
+    "device",
+    "steps"
+  ],
+  "title": "Project",
+  "type": "object"
+}

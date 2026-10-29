@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "id": "c6bf4ea79515501ab0deece5ed831462",
+  "name": "现有 iPad 六步循环",
+  "device": {
+    "name": "iPad14,3 · 原竖屏布局",
+    "family": "ipad",
+    "connector": "usb-c",
+    "orientation": "portrait",
+    "width": 754,
+    "height": 1080
+  },
+  "steps": [
+    {
+      "do": "tap",
+      "x": 0.47139991554054056,
+      "y": 0.10662014023657607,
+      "wait_ms": 3000,
+      "source_index": 0
+    },
+    {
+      "do": "tap",
+      "x": 0.4765320139310659,
+      "y": 0.16497793920039241,
+      "wait_ms": 500,
+      "source_index": 1
+    },
+    {
+      "do": "tap",
+      "x": 0.4716185374278773,
+      "y": 0.21261228851415492,
+      "wait_ms": 500,
+      "source_index": 2
+    },
+    {
+      "do": "tap",
+      "x": 0.4852474709611297,
+      "y": 0.2790646367762161,
+      "wait_ms": 500,
+      "source_index": 3
+    },
+    {
+      "do": "tap",
+      "x": 0.4767568042058913,
+      "y": 0.3527338056378446,
+      "wait_ms": 500,
+      "source_index": 4
+    },
+    {
+      "do": "tap",
+      "x": 0.9581476095126025,
+      "y": 0.9470014351660737,
+      "wait_ms": 2588,
+      "source_index": 5
+    }
+  ],
+  "loops": 0,
+  "startup_ms": 10000,
+  "settle_ms": 350,
+  "press_ms": 60,
+  "release_ms": 90
+}

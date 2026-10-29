@@ -1,0 +1,21 @@
+# Local device data, secrets, backup images and artifacts are never published.
+.env
+**/secrets.h
+.venv/
+**/.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+**/build/
+/hardware/build/
+/data/
+/backups/
+/artifacts/
+/recordings/
+*.bin
+*.elf
+*.map
+*.log
+*.pid
+.DS_Store

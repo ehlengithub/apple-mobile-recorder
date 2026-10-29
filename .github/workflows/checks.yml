@@ -1,0 +1,18 @@
+name: Checks
+on: [push, pull_request]
+permissions:
+  contents: read
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.12'
+      - run: uv sync --project server --all-extras --frozen
+      - run: HIDAGENT_DATA=/tmp/apple-recorder-test server/.venv/bin/python -m pytest server/tests -q
+      - run: server/.venv/bin/ruff check server/hidagent/studio.py server/hidagent/studio_api.py server/hidagent/workbench.py server/hidagent/app.py server/tests/test_studio.py server/tests/test_studio_api.py
+      - run: node --check server/hidagent/static/studio.js
+      - run: c++ -std=c++17 -Wall -Wextra -Werror tests/replay_engine_test.cpp -o /tmp/replay-test && /tmp/replay-test
+      - run: bash -n scripts/setup-macos.sh 启动工作台.command 准备环境.command 启动测试页.command

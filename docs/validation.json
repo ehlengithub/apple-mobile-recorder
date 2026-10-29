@@ -1,0 +1,73 @@
+{
+  "date": "2026-10-30",
+  "python_tests": 171,
+  "cpp_scheduler": "passed",
+  "javascript_syntax": "passed",
+  "shell_syntax": "passed",
+  "ui": [
+    "select device project",
+    "edit 0.5 to 0.6 seconds and save",
+    "restore 0.5 and save",
+    "edit again after saving",
+    "build via UI",
+    "block stale build after edits",
+    "restore browser storage and project timing"
+  ],
+  "firmware_builds": {
+    "iphone": {
+      "status": "succeeded",
+      "schema_version": 1,
+      "mode": "offline",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "application_offset": 65536,
+      "application_file": "OfflinePlayer.ino.bin",
+      "application_sha256": "09e809b2cb4390cc5b67a391d2e732b5cea019b9ea814476d562a459a9ef0606",
+      "bytes": 389504,
+      "project_id": "8abd8cab184b587ba573bb42da979837",
+      "steps": 9,
+      "cycle_ms": 9000,
+      "loops": 1,
+      "startup_ms": 10000,
+      "deployment_id": "f2ac5ed634164c82bf6c7688a21ce4a9",
+      "contains_network_credentials": false,
+      "project_sha256": "276f9b3ac39e424b68f3c1a062db429f95b3001a53213e58482fa547ad30c85c"
+    },
+    "ipad": {
+      "status": "succeeded",
+      "schema_version": 1,
+      "mode": "offline",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "application_offset": 65536,
+      "application_file": "OfflinePlayer.ino.bin",
+      "application_sha256": "c89a3c89c15e5747c55aea39fa3bea7c28e6ad6c9d345c733c828514b406843f",
+      "bytes": 389488,
+      "project_id": "c6bf4ea79515501ab0deece5ed831462",
+      "steps": 6,
+      "cycle_ms": 7588,
+      "loops": 0,
+      "startup_ms": 10000,
+      "deployment_id": "9ef4402c0181497e87637bf85a88fbb6",
+      "contains_network_credentials": false,
+      "project_sha256": "54c7a43b2a2f06dc30462036aeb98e2cb6a24b2a2d4a329ccb6e24a255ad3cdc"
+    },
+    "desktop": {
+      "status": "succeeded",
+      "schema_version": 1,
+      "mode": "desktop",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "application_offset": 65536,
+      "application_file": "DesktopBridge.ino.bin",
+      "application_sha256": "723c9cb49dc80ef95ee55b0a7e52cc6483afdfffe27a26a9e939cc1d1cc4cc27",
+      "bytes": 963840,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "deployment_id": "087aa798e1d04b8dad31067f82d70982",
+      "contains_network_credentials": true
+    }
+  },
+  "physical_flash_performed_for_new_repository": false,
+  "new_iphone_hardware_acceptance": false
+}
