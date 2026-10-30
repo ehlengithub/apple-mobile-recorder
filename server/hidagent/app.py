@@ -8,10 +8,11 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, HTTPException, Query, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
+from . import runtime_version
 from .agent import Agent
 from .debug import Trace
 from .device import Device, DeviceError
@@ -60,6 +61,20 @@ async def local_mutations(request, call_next):
             return Response("仅允许本机页面执行操作", status_code=403)
         if request.headers.get("sec-fetch-site") == "cross-site":
             return Response("拒绝跨站操作", status_code=403)
+        if not runtime_version.runtime_is_current():
+            # Updating files must not combine new assets with imported old
+            # Python. Always preserve the stop paths for already-running work.
+            stop = request.url.path in ("/api/agent/stop", "/api/macro/stop")
+            if request.url.path == "/api/studio/player/control":
+                try:
+                    body = await request.json()
+                    stop = isinstance(body, dict) and body.get("command") == "stop"
+                except ValueError:
+                    pass
+            if not stop:
+                return JSONResponse(
+                    {"detail": "工作台源码已更新，请停止原后台并重新启动；本次操作未执行"}, status_code=409
+                )
     return await call_next(request)
 class Static(StaticFiles):
     """Static files that browsers re-check on every load, so a new version shows up on refresh."""
@@ -110,20 +125,35 @@ def check_keyboard(text, ascii_only=False):
 
 
 manual_lock = asyncio.Lock()
+manual_task: asyncio.Task | None = None
+manual_generation = 0
+stopping = False
+stop_task: asyncio.Task | None = None
 
 
 def check_manual():
-    if agent.running or macro.playing or manual_lock.locked():
+    if stopping or agent.running or macro.playing or manual_lock.locked():
         raise HTTPException(409, "phone is busy; stop the agent or wait for the current action")
 
 
 async def act(action):
+    global manual_task
     check_manual()
+    generation = manual_generation
+    task = None
     try:
         async with manual_lock:
-            await action()
+            task = manual_task = asyncio.create_task(action())
+            await task
+    except asyncio.CancelledError:
+        if generation != manual_generation:
+            raise HTTPException(409, "操作已被紧急停止取消，未继续执行") from None
+        raise
     except (DeviceError, RuntimeError) as e:
         raise HTTPException(409, str(e)) from e
+    finally:
+        if manual_task is task:
+            manual_task = None
     return {"ok": True}
 
 
@@ -249,31 +279,31 @@ async def raw(t: Text):
 @app.post("/api/calibrate/start")
 async def calibrate_start():
     """Calibrate the pointer. {"auto": true}: done by itself; otherwise the user clicks the pointer next."""
-    check_manual()
-    try:
-        async with manual_lock:
-            return {"ok": True, "auto": await phone.start_calibration(), "span": phone.span}
-    except (DeviceError, RuntimeError) as e:
-        raise HTTPException(409, str(e)) from e
+    result = {}
+
+    async def calibrate():
+        result.update(auto=await phone.start_calibration(), span=phone.span)
+
+    await act(calibrate)
+    return {"ok": True, **result}
 
 
 @app.post("/api/calibrate/finish")
 async def calibrate_finish(p: Point):
-    check_manual()
     if not 0 < p.x < 1 or not 0 < p.y < 1:
         raise HTTPException(422, "calibration pointer must be inside the screen")
-    try:
-        async with manual_lock:
-            phone.finish_calibration(p.x, p.y)
-            await phone.calibrate_grid()
-    except (DeviceError, RuntimeError) as e:
-        raise HTTPException(409, str(e)) from e
+
+    async def calibrate():
+        phone.finish_calibration(p.x, p.y)
+        await phone.calibrate_grid()
+
+    await act(calibrate)
     return {"ok": True, "span": phone.span}
 
 
 @app.post("/api/agent")
 async def agent_start(t: Text):
-    if manual_lock.locked() or macro.playing or macro.recording:
+    if stopping or manual_lock.locked() or macro.playing or macro.recording:
         raise HTTPException(409, "phone is busy; wait for the current action")
     try:
         agent.start(t.text)
@@ -282,17 +312,38 @@ async def agent_start(t: Text):
     return {"ok": True}
 
 
+async def _stop_actions():
+    """Finish cancellation cleanup before moving the pointer; keep new actions out."""
+    global stopping
+    try:
+        pending = manual_task
+        running_agent = getattr(agent, "_job", None)
+        if pending is not None and not pending.done():
+            pending.cancel()
+        agent.stop()
+        macro.stop()
+        tasks = [task for task in (pending, running_agent) if task is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await macro.wait_stopped()
+        async with manual_lock:
+            if device.connected:
+                await phone.reset()
+    finally:
+        stopping = False
+
+
 @app.post("/api/agent/stop")
 async def agent_stop():
-    """Emergency stop: cancel the agent and release the mouse button."""
-    agent.stop()
-    macro.stop()
-    await macro.wait_stopped()
-    await asyncio.sleep(0.1)  # let a gesture in flight finish its own release
-    # Emergency stop must stay available even while a direct action holds the lock.
+    """Emergency stop is complete only after every in-flight action has stopped."""
+    global stopping, stop_task, manual_generation
+    if stop_task is None or stop_task.done():
+        stopping = True
+        manual_generation += 1
+        stop_task = asyncio.create_task(_stop_actions())
     try:
-        if device.connected:
-            await phone.reset()
+        # A disconnected HTTP client must not abandon cancellation or release.
+        await asyncio.shield(stop_task)
     except (DeviceError, RuntimeError) as e:
         raise HTTPException(409, str(e)) from e
     return {"ok": True}

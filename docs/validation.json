@@ -1,6 +1,6 @@
 {
   "date": "2026-10-30",
-  "python_tests": 227,
+  "python_tests": 339,
   "cpp_scheduler": "passed",
   "javascript_syntax": "passed",
   "shell_syntax": "passed",
@@ -70,8 +70,8 @@
       "contains_network_credentials": true
     }
   },
-  "verification_round": "unified-usb-ble-player",
-  "javascript_ui_tests": 30,
+  "verification_round": "seven-review-fixes-no-hardware",
+  "javascript_ui_tests": 70,
   "v2_ui_test_method": "isolated Node VM DOM/fetch mocks; no user browser touched",
   "v2_cpp": {
     "asan_ubsan": "passed",
@@ -223,5 +223,30 @@
     "maintenance_failures_and_power_cuts": "passed in native policy tests",
     "notify_retries": "4 attempts, 2ms between failed attempts; stop if link/session changes",
     "management_session_epochs_separated": true
+  },
+  "review_fixes": {
+    "baseline_commit": "9ca43ec46b57aa95934763ad8e8634dbaece9f1c",
+    "confirmed_findings": 7,
+    "fixed_findings": [
+      "Cancel and await in-flight manual actions before emergency stop returns",
+      "Lock project operations and reject changed identities or stale async responses",
+      "Invalidate firmware builds on network revision or snapshot changes",
+      "Check runtime API, capabilities, source and data identity before reuse or mutations",
+      "Separate absolute session geometry from legacy relative calibration",
+      "Persist uncertain control state, reconcile by stop and verify; never retry arm",
+      "Restore proven original blank layout after our interrupted initialization"
+    ],
+    "python_tests": 339,
+    "javascript_ui_tests": 70,
+    "cpp": "ASan and UBSan passed; 6000 file mutations and 4000 bounded byte streams",
+    "python_native_transport": "USB and BLE including lost-arm-ack safe-stop reconciliation via native process pipes",
+    "browser_method": "Node VM DOM/fetch mocks only; no real browser storage accessed",
+    "hardware_source_changed": false,
+    "physical_serial_opened": false,
+    "flashed": false,
+    "live_service_restarted": false,
+    "actual_page_acceptance": false,
+    "existing_untracked_research_included": false,
+    "note": "Shared firmware and timing unchanged; prior Arduino compilation records remain historical."
   }
 }

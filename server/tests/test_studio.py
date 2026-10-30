@@ -290,3 +290,124 @@ def test_player_and_legacy_use_identical_replay_engine():
     assert (studio.ROOT / "hardware/player/replay_engine.h").read_bytes() == (
         studio.ROOT / "hardware/offline_replay/replay_engine.h"
     ).read_bytes()
+
+
+def interrupted_initialization(tmp_path, monkeypatch, *, controller="ble-esp32", phase="bootloader", killed=False):
+    """Apply esptool segments to an in-memory flash, interrupt a real _flash."""
+    manager, job, build_id, calls = prepare_flash(tmp_path, monkeypatch)
+    folder = manager.store.jobs / build_id
+    manifest_path = folder / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    target = studio.profile(controller)
+    manifest.update(
+        controller=controller, **{key: target[key] for key in ("chip", "transport", "fqbn", "bootloader_offset")}
+    )
+    studio.atomic_json(manifest_path, manifest)
+    (folder / "firmware/OfflinePlayer.ino.bootloader.bin").write_bytes(b"changed-bootloader")
+    boot_app = tmp_path / "Library/Arduino15/packages/esp32/hardware/esp32/test/tools/partitions/boot_app0.bin"
+    boot_app.parent.mkdir(parents=True)
+    boot_app.write_bytes(b"mock-boot-app")
+    monkeypatch.setattr(studio.Path, "home", lambda: tmp_path)
+    flash = bytearray(b"\xff" * 0x12000)
+    before = bytes(flash)
+
+    def run(state, argv, timeout=600):
+        calls.append(argv)
+        if "chip-id" in argv:
+            return "MAC: 7c:e8:b1:a4:85:94"
+        if "read-flash" in argv:
+            index = argv.index("read-flash")
+            offset, size = int(argv[index + 1], 0), int(argv[index + 2], 0)
+            Path(argv[index + 3]).write_bytes(flash[offset : offset + size])
+        if "write-flash" in argv:
+            index = argv.index("write-flash")
+            for number, (offset, file) in enumerate(zip(argv[index + 1 :: 2], argv[index + 2 :: 2], strict=True)):
+                blob = Path(file).read_bytes()
+                offset = int(offset, 0)
+                flash[offset : offset + len(blob)] = blob
+                if state["id"] == job["id"] and (
+                    (phase == "bootloader" and number == 0)
+                    or (phase == "partition" and number == 1)
+                    or (phase == "application" and number == 3)
+                ):
+                    # Journal must already be durable before the first byte.
+                    journal = json.loads((manager.store.jobs / job["id"] / "backup/restore.json").read_text())
+                    assert journal["write_stage"] == "write_started"
+                    if killed:
+                        raise SystemExit("simulated process death")
+                    raise RuntimeError("simulated cable lost after " + phase)
+        return "Hash of data verified."
+
+    monkeypatch.setattr(manager, "_run", run)
+    error = SystemExit if killed else RuntimeError
+    with pytest.raises(error, match="simulated"):
+        manager._flash(job, build_id, "/dev/test-board", initialize=True, controller=controller)
+    assert job["backup_ready"] and bytes(flash) != before
+    journal_path = manager.store.jobs / job["id"] / "backup/restore.json"
+    journal = json.loads(journal_path.read_text())
+    assert journal["write_stage"] == ("write_started" if killed else "write_failed")
+    assert journal["original_partition_sha256"] == hashlib.sha256(before[0x8000:0x9000]).hexdigest()
+    assert journal["target_partition_sha256"] == journal["installed_partition_sha256"]
+    calls.clear()
+    return manager, job, calls, flash, before, journal_path
+
+
+@pytest.mark.parametrize("controller", ["usb-s3", "ble-esp32"])
+@pytest.mark.parametrize("phase", ["bootloader", "partition", "application"])
+@pytest.mark.parametrize("killed", [False, True])
+def test_restore_own_interrupted_initialization_with_original_or_target_layout(
+    tmp_path, monkeypatch, controller, phase, killed
+):
+    manager, job, calls, flash, before, _ = interrupted_initialization(
+        tmp_path, monkeypatch, controller=controller, phase=phase, killed=killed
+    )
+    restored = {"id": "c" * 32}
+    # Simulate a new Jobs instance after process restart; use only durable job
+    # and restore metadata, keeping esptool isolated in the same memory model.
+    restarted = Jobs(manager.store)
+    monkeypatch.setattr(restarted, "_run", manager._run)
+    restarted._restore(restored, job["id"], "/dev/test-board")
+    assert bytes(flash) == before and restored["flash_hash_verified"]
+    write = calls[-1][calls[-1].index("write-flash") + 1 :]
+    assert write[0] == "0x0" and write[2] == "0x10000"
+
+
+@pytest.mark.parametrize("layout", ["external", "torn"])
+def test_interrupted_initialization_never_allows_unknown_external_or_torn_partition(tmp_path, monkeypatch, layout):
+    manager, job, calls, flash, _, _ = interrupted_initialization(tmp_path, monkeypatch)
+    if layout == "external":
+        struct.pack_into("<HBBII", flash, 0x8000, 0x50AA, 1, 2, 0x10000, 8192)
+    else:
+        flash[0x8000:0x8004] = b"\xaa\x50\x00\x00"
+    with pytest.raises(ValueError, match="分区"):
+        manager._restore({"id": "c" * 32}, job["id"], "/dev/test-board")
+    assert not any("write-flash" in call or "hard-reset" in call for call in calls)
+
+
+@pytest.mark.parametrize(
+    "tamper", ["mac", "boot", "app", "original-hash", "target-hash", "journal-id", "stage", "legacy"]
+)
+def test_original_blank_layout_exception_still_requires_identity_hashes_and_own_journal(tmp_path, monkeypatch, tamper):
+    manager, job, calls, _, _, journal_path = interrupted_initialization(tmp_path, monkeypatch)
+    info = json.loads(journal_path.read_text())
+    if tamper == "mac":
+        info["mac"] = "aa:bb:cc:dd:ee:ff"
+    elif tamper in ("boot", "app"):
+        file = "boot-and-partitions.bin" if tamper == "boot" else "application.bin"
+        path = journal_path.parent / file
+        blob = bytearray(path.read_bytes())
+        blob[0] ^= 1
+        path.write_bytes(blob)
+    elif tamper in ("original-hash", "target-hash"):
+        info["original_partition_sha256" if tamper == "original-hash" else "target_partition_sha256"] = "0" * 64
+    elif tamper == "journal-id":
+        info["flash_id"] = "d" * 32
+    elif tamper == "stage":
+        info["write_stage"] = "write_verified"
+    else:
+        info.pop("schema_version")
+        info.pop("write_stage")
+    studio.atomic_json(journal_path, info)
+    with pytest.raises(ValueError):
+        manager._restore({"id": "c" * 32}, job["id"], "/dev/test-board")
+    assert not any("write-flash" in call for call in calls)

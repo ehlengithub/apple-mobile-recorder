@@ -19,6 +19,15 @@ CRC = re.compile(r"^[0-9a-f]{8}$")
 FAMILIES = {"iphone": 1, "ipad": 2, "other-apple": 3}
 
 
+class ControlUncertain(RuntimeError):
+    """The command may have committed before the UART acknowledgement failed."""
+
+    def __init__(self, message, reconciliation, info=None):
+        super().__init__(message)
+        self.reconciliation = reconciliation
+        self.info = info
+
+
 def encode_recording(project):
     device = project.device
     data = HEADER.pack(
@@ -71,10 +80,11 @@ def validate_recording(data):
 
 
 class Player:
-    """Only call after the user disconnects HID. Serial open may reset a board."""
+    """Require safe maintenance unless stop_only. Serial open may reset a board."""
 
-    def __init__(self, port, expected_mac, serial_factory=None, *, controller="usb-s3"):
+    def __init__(self, port, expected_mac, serial_factory=None, *, controller="usb-s3", stop_only=False):
         self.target = profile(controller)
+        self.stop_only = stop_only
         if not MAC.fullmatch(expected_mac):
             raise ValueError("请填写已核对的板卡MAC")
         self.expected_mac = expected_mac
@@ -90,12 +100,12 @@ class Player:
             self.serial.port = port
             self.serial.open()
             self.info = self.request("info", timeout=8)
-            self._identity(self.info)
+            self._identity(self.info, require_safe=not stop_only)
         except BaseException:
             self.serial.close()
             raise
 
-    def _identity(self, info):
+    def _identity(self, info, *, require_safe=True):
         if info.get("protocol") != 2:
             raise ValueError("当前固件不是通用播放器v2，请先安装一次播放器")
         if info.get("mac") != self.expected_mac:
@@ -104,13 +114,17 @@ class Player:
             info.get("chip", "esp32s3") != self.target["chip"]
         ):
             raise ValueError("播放器芯片或控制方式与所选板型不一致，禁止操作")
-        if self.target["transport"] == "ble" and (
-            info.get("maintenance") is not True
-            or info.get("maintenance_saved") is not True
-            or info.get("connected") is not False
+        if (
+            require_safe
+            and self.target["transport"] == "ble"
+            and (
+                info.get("maintenance") is not True
+                or info.get("maintenance_saved") is not True
+                or info.get("connected") is not False
+            )
         ):
             raise ValueError("蓝牙板未进入维护模式：保持供电长按BOOT两秒后再操作")
-        if info.get("mounted") is not False:
+        if require_safe and info.get("mounted") is not False:
             raise ValueError("请先拔下USB/HID与iPhone/iPad的连接，再操作播放器")
         size = info.get("size")
         if type(size) is not int or size < 0 or size > MAX_BYTES:
@@ -140,7 +154,12 @@ class Player:
                     reply.get("error", "播放器拒绝操作") if isinstance(reply, dict) else "播放器响应无效"
                 )
             return reply
-        raise RuntimeError("播放器响应超时；未确认成功，请保持USB/HID断开")
+        hint = (
+            "蓝牙状态未确认；保持供电长按BOOT两秒进入维护模式"
+            if self.target["transport"] == "ble"
+            else "未确认成功，请保持USB/HID断开"
+        )
+        raise RuntimeError("播放器响应超时；" + hint)
 
     def read_recording(self, info=None):
         info = self._identity(info or self.request("info"))
@@ -163,6 +182,8 @@ class Player:
         return bytes(data)
 
     def upload(self, data):
+        if self.stop_only:
+            raise ValueError("停止专用连接禁止上传")
         meta = validate_recording(data)
         self._identity(self.request("info"))
         try:
@@ -188,22 +209,71 @@ class Player:
                 self.request("abort", timeout=1)
             raise
 
-    def control(self, command, expected_crc="", expected_data=None):
-        info = self._identity(self.request("info"))
+    def control(self, command, expected_crc="", expected_data=None, *, on_send=None):
+        if command not in ("arm", "desktop", "stop"):
+            raise ValueError("无效播放器操作")
+        if self.stop_only and command != "stop":
+            raise ValueError("停止专用连接禁止启用或电脑录制")
+        info = self._identity(self.request("info"), require_safe=command != "stop")
         if command == "arm":
             if not CRC.fullmatch(expected_crc) or info["crc"] != expected_crc or not info["size"]:
                 raise ValueError("板内录制与当前项目不同，请先重新上传")
             data = self.read_recording(info)
             if expected_data is not None and data != expected_data:
                 raise ValueError("板内录制与当前项目内容不一致，禁止启用")
-        elif command not in ("desktop", "stop"):
-            raise ValueError("无效播放器操作")
-        reply = self.request(command)
-        if command == "arm" and reply.get("armed") is not True:
-            raise RuntimeError("播放器未确认启用")
-        if command == "desktop" and reply.get("mode") != "desktop":
-            raise RuntimeError("播放器未确认电脑录制模式")
+        # Persist invalidation before write: even a write/flush exception can
+        # occur after the board received the command. Never retry arm/desktop.
+        if on_send:
+            on_send()
+        try:
+            reply = self.request(command)
+            if command == "arm" and reply.get("armed") is not True:
+                raise RuntimeError("播放器未确认启用")
+            if command == "desktop" and reply.get("mode") != "desktop":
+                raise RuntimeError("播放器未确认电脑录制模式")
+            if command == "stop":
+                reply = self._stopped_info()
+        except Exception as exc:
+            reconciliation, observed = self._reconcile_stop()
+            if reconciliation["status"] == "stopped":
+                hint = "已核验软件停止；重新物理确认维护状态后再操作"
+            elif self.target["transport"] == "ble":
+                hint = "可能已运行；请立即保持供电长按BOOT两秒进入持久维护模式"
+            else:
+                hint = "可能已运行；请保持USB/HID与目标设备断开"
+            raise ControlUncertain(
+                f"{command}回应未确认，操作状态未知；{hint}（{exc}）", reconciliation, observed
+            ) from exc
         return reply
+
+    def _stopped_info(self):
+        info = self._identity(self.request("info", timeout=2), require_safe=False)
+        if info.get("armed") is not False or (
+            self.target["transport"] == "ble"
+            and (
+                info.get("maintenance") is not True
+                or info.get("maintenance_saved") is not True
+                or info.get("connected") is not False
+            )
+        ):
+            raise RuntimeError("未确认播放器已停止并进入持久维护")
+        return info
+
+    def _reconcile_stop(self):
+        """Read identity again before compensation; a stop ACK alone is no proof."""
+        observed = None
+        attempted = False
+        try:
+            observed = self._identity(self.request("info", timeout=2), require_safe=False)
+            attempted = True
+            # A lost stop ACK is also ambiguous. The subsequent info is the
+            # proof of safety, so still try it once after a stop I/O failure.
+            with contextlib.suppress(Exception):
+                self.request("stop", timeout=2)
+            observed = self._stopped_info()
+            return {"status": "stopped", "stop_attempted": True}, observed
+        except Exception as exc:
+            return {"status": "unknown", "stop_attempted": attempted, "error": str(exc)}, observed
 
     def close(self):
         self.serial.close()

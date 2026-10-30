@@ -508,6 +508,9 @@ class Jobs:
         if (backup / "application.bin").stat().st_size != app_size:
             raise ValueError("应用区备份读取不完整，未写入")
         restore = {
+            "schema_version": 2,
+            "flash_id": job["id"],
+            "write_stage": "backup_ready",
             "controller": built_controller,
             "chip": target["chip"],
             "mac": mac.group(1).lower(),
@@ -516,6 +519,8 @@ class Jobs:
             "application_sha256": hashlib.sha256((backup / "application.bin").read_bytes()).hexdigest(),
             "boot_sha256": hashlib.sha256(original).hexdigest(),
             "initialized_empty_board": empty,
+            "original_partition_sha256": hashlib.sha256(original[0x8000:0x9000]).hexdigest(),
+            "target_partition_sha256": hashlib.sha256(expected.ljust(4096, b"\xff")[:4096]).hexdigest(),
             "installed_partition_sha256": hashlib.sha256(
                 expected.ljust(4096, b"\xff")[:4096] if empty else original[0x8000:0x9000]
             ).hexdigest(),
@@ -542,9 +547,20 @@ class Jobs:
                 str(sorted(candidates)[-1]),
                 *segments,
             ]
-        output = command("write-flash", *segments, after="hard-reset")
-        if "Hash of data verified" not in output:
-            raise RuntimeError("未获得写入哈希校验确认，请保留备份检查板卡")
+        # Journal before invoking esptool: process death can leave any prefix
+        # written. Never claim that the target table was actually installed.
+        restore["write_stage"] = "write_started"
+        atomic_json(backup / "restore.json", restore)
+        try:
+            output = command("write-flash", *segments, after="hard-reset")
+            if "Hash of data verified" not in output:
+                raise RuntimeError("未获得写入哈希校验确认，请保留备份检查板卡")
+        except Exception:
+            restore["write_stage"] = "write_failed"
+            atomic_json(backup / "restore.json", restore)
+            raise
+        restore["write_stage"] = "write_verified"
+        atomic_json(backup / "restore.json", restore)
         self._save(
             job,
             stage="播放器写入成功；请单独上传录制并明确启用",
@@ -591,7 +607,20 @@ class Jobs:
         expected_hash = info.get("installed_partition_sha256")
         if not expected_hash and not info["initialized_empty_board"]:
             expected_hash = hashlib.sha256(old_boot[0x8000:0x9000]).hexdigest()
-        if not expected_hash or hashlib.sha256(current_bytes[0x8000:0x9000]).hexdigest() != expected_hash:
+        current_hash = hashlib.sha256(current_bytes[0x8000:0x9000]).hexdigest()
+        original_hash = hashlib.sha256(old_boot[0x8000:0x9000]).hexdigest()
+        # Only our interrupted empty-board initialization can justify the
+        # original blank layout. Unknown/torn/external tables remain blocked.
+        interrupted_original = (
+            info.get("schema_version") == 2
+            and info.get("flash_id") == flash_id
+            and info.get("write_stage") in ("write_started", "write_failed")
+            and info.get("initialized_empty_board") is True
+            and old_boot == b"\xff" * 65536
+            and info.get("original_partition_sha256") == original_hash == current_hash
+            and info.get("target_partition_sha256") == expected_hash
+        )
+        if (not expected_hash or current_hash != expected_hash) and not interrupted_original:
             raise ValueError("当前分区与备份时不一致，禁止恢复；请先核对板卡分区布局")
         if info.get("application_offset") != 65536 or app.stat().st_size != info.get("application_bytes"):
             raise ValueError("应用备份偏移或长度无效，禁止恢复")
@@ -608,7 +637,7 @@ class Jobs:
             stage=("已恢复安装前的空板快照" if info["initialized_empty_board"] else "应用已恢复；原NVS数据未改写"),
         )
 
-    def _open_player(self, job, port, expected_mac, controller="usb-s3"):
+    def _open_player(self, job, port, expected_mac, controller="usb-s3", *, stop_only=False):
         from .player import Player
 
         if port not in {p["port"] for p in ports()}:
@@ -619,7 +648,7 @@ class Jobs:
                 raise ValueError("COM串口被其他程序占用")
         profile(controller)
         self._save(job, stage="核对播放器、板型与维护状态", port=port, board_mac=expected_mac, controller=controller)
-        return Player(port, expected_mac, controller=controller)
+        return Player(port, expected_mac, controller=controller, stop_only=stop_only)
 
     def _upload(self, job, project, port, expected_mac, controller="usb-s3"):
         from .player import encode_recording
@@ -646,13 +675,47 @@ class Jobs:
             player.close()
 
     def _player_control(self, job, project, port, expected_mac, command, controller="usb-s3"):
-        from .player import encode_recording, validate_recording
+        from .player import ControlUncertain, encode_recording, validate_recording
 
         payload = encode_recording(project) if command == "arm" and project else None
         crc = validate_recording(payload)["crc"] if payload else ""
-        player = self._open_player(job, port, expected_mac, controller)
+        self._save(
+            job,
+            command=command,
+            command_sent=False,
+            control_uncertain=False,
+            maintenance_confirmation_invalidated=False,
+        )
+        player = self._open_player(job, port, expected_mac, controller, stop_only=command == "stop")
         try:
-            reply = player.control(command, crc, payload)
-            self._save(job, player=reply, command=command, stage="播放器操作已确认")
+
+            def sending():
+                self._save(
+                    job,
+                    command_sent=True,
+                    maintenance_confirmation_invalidated=True,
+                    operation_state="unknown",
+                    may_be_running=True,
+                )
+
+            try:
+                reply = player.control(command, crc, payload, on_send=sending)
+            except ControlUncertain as exc:
+                self._save(
+                    job,
+                    control_uncertain=True,
+                    operation_state="unknown",
+                    may_be_running=exc.reconciliation["status"] != "stopped",
+                    reconciliation=exc.reconciliation,
+                    player=exc.info,
+                )
+                raise
+            self._save(
+                job,
+                player=reply,
+                operation_state="confirmed",
+                may_be_running=command != "stop",
+                stage="播放器操作已确认",
+            )
         finally:
             player.close()

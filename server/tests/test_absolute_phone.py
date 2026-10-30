@@ -1,4 +1,5 @@
 import asyncio
+import json
 import time
 
 import pytest
@@ -80,3 +81,43 @@ def test_absolute_pointer_handles_hidden_baseline_and_rejects_static_or_colored_
     assert absolute_pointer(blank, cursor, (.5, .5)) == pytest.approx((.5, .5))
     assert absolute_pointer(cursor, cursor, (.5, .5)) is None
     assert absolute_pointer(blank, frame('red'), (.5, .5)) is None
+
+
+def test_legacy_relative_calibration_does_not_block_absolute_device_or_get_overwritten(tmp_path, monkeypatch):
+    path = tmp_path / 'calibration.json'
+    original = json.dumps({'w': 400, 'h': 850, 'grid_points': 9, 'frame_aspect': .46})
+    path.write_text(original)
+    device, screen = Device(), Screen()
+    phone = Phone(device, path, screen)
+    monkeypatch.setattr('hidagent.phone.vision.absolute_pointer', lambda *_: (.595, .5))
+
+    async def run():
+        await phone.tap(.5, .5, aim=True, strict=True)
+        assert await phone.start_calibration()
+
+    asyncio.run(run())
+    assert device.commands[-1] == 'click'
+    assert path.read_text() == original and phone.frame_aspect == .46
+    # Returning to a relative device must retain its original geometry protection.
+    device.absolute = False
+    with pytest.raises(PhoneUnavailable, match='比例'):
+        phone._check_geometry()
+
+
+def test_absolute_geometry_change_requires_explicit_rebind_or_new_hid_session(tmp_path):
+    phone = Phone(Device(), tmp_path / 'unused.json', Screen())
+    phone._check_geometry()
+    phone.screen.aspect = 1.4
+    with pytest.raises(PhoneUnavailable, match='比例'):
+        asyncio.run(phone.tap(.5, .5))
+    assert not phone.device.commands
+    assert asyncio.run(phone.start_calibration())
+    phone._check_geometry()
+    phone.screen.aspect = .8
+    with pytest.raises(PhoneUnavailable):
+        phone._check_geometry()
+    phone.device.links += 1
+    phone._check_geometry()
+    phone.screen.live = False
+    with pytest.raises(PhoneUnavailable, match='投屏'):
+        asyncio.run(phone.start_calibration())

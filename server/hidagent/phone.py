@@ -55,6 +55,10 @@ class Phone:
         self._link = 0  # device.links when the pointer was last homed
         self.grid_points = (saved or {}).get("grid_points", 0)
         self.frame_aspect = (saved or {}).get("frame_aspect", 0)
+        # Relative calibration belongs to its old device. Native absolute input
+        # binds geometry to the current HID connection, never that legacy file.
+        self._absolute_session = None
+        self._absolute_aspect = 0
         # where the pointer really landed (seen on screen) for the screen fraction we aimed at, per axis;
         # a straight-line fit through them corrects every later move, so taps get better as the agent works
         self._seen = {axis: deque(map(tuple, (saved or {}).get("seen", {}).get(axis, [])), maxlen=24)
@@ -74,7 +78,13 @@ class Phone:
 
     def _check_geometry(self) -> None:
         aspect = getattr(self.screen, "aspect", 0)
-        if self.frame_aspect and aspect and abs(aspect / self.frame_aspect - 1) > 0.03:
+        expected = self.frame_aspect
+        if self.absolute:
+            session = (self.device.links, getattr(self.device, "transport", "usb"))
+            if session != self._absolute_session:
+                self._absolute_session, self._absolute_aspect = session, aspect
+            expected = self._absolute_aspect
+        if expected and aspect and abs(aspect / expected - 1) > 0.03:
             raise PhoneUnavailable("手机画面方向或比例已变化，请重新执行全屏九点校准")
 
     async def start_calibration(self) -> bool:
@@ -85,7 +95,12 @@ class Phone:
         (finish_calibration).
         """
         if self.absolute:
-            self._check_geometry()
+            aspect = getattr(self.screen, "aspect", 0)
+            if self.screen is None or not self.screen.live or not aspect:
+                raise PhoneUnavailable("请先连接目标设备投屏，再确认新的画面方向与比例")
+            self._absolute_session = (self.device.links, getattr(self.device, "transport", "usb"))
+            self._absolute_aspect = aspect
+            self.forget_position()
             return True  # Native normalized coordinates do not use a relative calibration fit.
         self._pos = None
         self.grid_points = 0

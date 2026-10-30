@@ -83,3 +83,45 @@ def test_real_python_to_cpp_upload_and_mode_switch(native, count):
         assert not player.request("info")["armed"]
     finally:
         player.close()
+
+
+def test_lost_arm_ack_does_not_retry_or_assume_native_firmware_stopped(native):
+    from hidagent.player import ControlUncertain
+
+    executable, controller = native
+
+    class LostArmAck(Pipe):
+        def __init__(self, executable):
+            super().__init__(executable)
+            self.commands = []
+            self.drop = False
+
+        def write(self, data):
+            self.commands.append(data.decode().strip())
+            self.drop = data == b"arm\n"
+            super().write(data)
+
+        def read_until(self, *_):
+            reply = super().read_until()
+            if self.drop:
+                self.drop = False
+                raise OSError("simulated acknowledgement lost after native arm")
+            return reply
+
+    pipe = LostArmAck(executable)
+    player = Player("native-no-hardware", MAC, serial_factory=lambda **_: pipe, controller=controller)
+    try:
+        payload = encode_recording(plan())
+        meta = player.upload(payload)
+        with pytest.raises(ControlUncertain) as result:
+            player.control("arm", meta["crc"], payload)
+        # The native harness implements Store/Maintenance but only ACKs stop;
+        # that false ACK must never be accepted as proof of a stopped board.
+        assert result.value.reconciliation["status"] == "unknown"
+        assert player.request("info")["armed"] is True
+        assert pipe.commands.count("arm") == 1 and pipe.commands.count("stop") == 1
+        if controller == "ble-esp32":
+            player.request("maintenance")
+            assert player.request("info")["maintenance"] is True
+    finally:
+        player.close()

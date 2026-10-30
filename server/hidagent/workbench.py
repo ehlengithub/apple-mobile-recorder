@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
 import uuid
 import webbrowser
@@ -16,6 +17,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from . import runtime_version
 from .controllers import PROFILES
 from .studio import Jobs, Project, Store, ports, tools_status
 
@@ -110,7 +112,7 @@ def main(argv=None):
             )
             return 0
         if args.command in ("build", "flash", "restore", "upload", "player"):
-            if args.command in ("upload", "player"):
+            if args.command == "upload" or (args.command == "player" and args.action != "stop"):
                 if args.controller == "ble-esp32" and not args.maintenance_confirmed:
                     raise ValueError("蓝牙板须先长按BOOT进入维护模式，并添加--maintenance-confirmed")
                 if args.controller == "usb-s3" and not args.hid_disconnected:
@@ -157,21 +159,58 @@ def main(argv=None):
                     print(json.dumps(state, ensure_ascii=False, indent=2))
                     return 0 if state["status"] == "succeeded" else 2
                 time.sleep(0.2)
-        import uvicorn
+        if not runtime_version.runtime_is_current():
+            raise RuntimeError("当前启动进程导入后源码已变更，请退出此进程并重新启动工作台。")
 
         try:
             with urllib.request.urlopen(f"http://127.0.0.1:{args.port}/api/studio/status", timeout=1) as existing:
                 current = json.load(existing)
-            if current.get("product") == "AppleMobileRecorder":
-                fingerprint = hashlib.sha256(str(args.data.resolve()).encode()).hexdigest()
-                if current.get("data_fingerprint") != fingerprint:
-                    raise RuntimeError("此端口属于另一个数据目录，请选择不同的--port")
-                if not args.no_browser:
-                    webbrowser.open(f"http://127.0.0.1:{args.port}/")
-                print("工作台已运行，已复用现有服务。")
-                return 0
-        except (OSError, ValueError):
-            pass
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError("此端口的服务不支持工作台握手，请选择不同的--port；未停止任何服务。") from exc
+        except OSError as exc:
+            reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+            if not isinstance(reason, ConnectionRefusedError):
+                raise RuntimeError(
+                    "无法确认此端口的后台版本，请检查原服务或选择不同的--port；未启动或停止任何服务。"
+                ) from exc
+        except ValueError as exc:
+            raise RuntimeError("此端口返回了无效的工作台握手，请选择不同的--port；未停止任何服务。") from exc
+        else:
+            if not isinstance(current, dict) or current.get("product") != "AppleMobileRecorder":
+                raise RuntimeError("此端口属于其他服务，请选择不同的--port；未停止任何服务。")
+            fingerprint = hashlib.sha256(str(args.data.resolve()).encode()).hexdigest()
+            if current.get("data_fingerprint") != fingerprint:
+                raise RuntimeError("此端口属于另一个数据目录，请选择不同的--port")
+            reason = runtime_version.incompatibility(current)
+            if reason:
+                raise RuntimeError(
+                    f"不能复用现有工作台：{reason}。请在原服务终端按Ctrl+C（或由其管理器停止），"
+                    "确认属于该工作台后重新启动；也可选择不同的--port。未自动停止任何服务。"
+                )
+            # The files may have changed while the handshake request was in flight.
+            if not runtime_version.runtime_is_current():
+                raise RuntimeError("握手期间源码已变更，请退出此进程并重新启动工作台。")
+            if not args.no_browser:
+                webbrowser.open(f"http://127.0.0.1:{args.port}/")
+            print("工作台已运行，版本校验通过，已复用现有服务。")
+            return 0
+
+        if not runtime_version.runtime_is_current():
+            raise RuntimeError("启动前源码已变更，请退出此进程并重新启动工作台。")
+
+        # Uvicorn's import string reuses sys.modules. Never combine a newly
+        # imported launcher with an old app or its already-bound data directory.
+        cached_app = sys.modules.get("hidagent.app")
+        if cached_app is not None:
+            cached_data = getattr(cached_app, "DATA_DIR", None)
+            if (
+                getattr(cached_app, "runtime_version", None) is not runtime_version
+                or cached_data is None
+                or Path(cached_data).resolve() != args.data.resolve()
+            ):
+                raise RuntimeError("当前进程已缓存旧版后台或其他数据目录的app，请退出此进程并重新启动工作台。")
+
+        import uvicorn
 
         receiver = None
         env = os.environ.copy()

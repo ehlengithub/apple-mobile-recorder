@@ -10,6 +10,8 @@ const flashID = "a".repeat(32), olderID = "b".repeat(32), taskID = "c".repeat(32
 function flash(id, created=1, status="succeeded") {
   return {id,created,kind:"flash",status,stage:"完成",backup_ready:true,backup_available:true,board_mac:"00:11:22:33:44:55"};
 }
+const validRuntime={api_version:1,capabilities:["runtime-version-handshake","controller-selection","player-upload","player-control"],
+  build_fingerprint:"d".repeat(64),source_root_fingerprint:"e".repeat(64),installed_matches_running:true};
 function page(state, {player=false,controller="usb-s3"} = {}) {
   const elements = new Map();
   function addElements(markup) {
@@ -18,7 +20,8 @@ function page(state, {player=false,controller="usb-s3"} = {}) {
       const element = {
         value:"",hidden:/\bhidden\b/.test(match[0]),disabled:/\bdisabled\b/.test(match[0]),style:{},textContent:"",
         addEventListener(event,fn){listeners[event]=fn},
-        async fire(event="click"){await listeners[event]?.({target:this})},
+        async fire(event="click"){await listeners[event]?.({target:this,currentTarget:this})},
+        click(){return this.fire()},
         replaceChildren(...children){this.options=children;this.value=children[0]?.value || ""},
         add(option){this.options.push(option)},
         insertRow(){return {insertCell(){return {append(){}}}}},
@@ -36,7 +39,7 @@ function page(state, {player=false,controller="usb-s3"} = {}) {
     requests.push({url,options});
     if(state.beforeResponse)await state.beforeResponse(url,options);
     let data;
-    if(url==="/api/studio/status") data={projects:[],ports:[{port:"/dev/MOCK-ONLY",description:"mock"}],tools:{},device_port:7400};
+    if(url==="/api/studio/status") data={runtime:Object.hasOwn(state,"runtime")?state.runtime:validRuntime,projects:state.projects || [],ports:[{port:"/dev/MOCK-ONLY",description:"mock"}],tools:{},device_port:7400};
     else if(url==="/api/status") data=state.status || {screen:false,device:false,macro:{}};
     else if(url==="/api/studio/jobs") data=state.jobs;
     else if(url.startsWith("/api/studio/jobs/")) {
@@ -53,6 +56,12 @@ function page(state, {player=false,controller="usb-s3"} = {}) {
       state.details[taskID]=data;
     } else if(url.startsWith("/api/studio/projects/") && options.method==="PUT") {
       data=JSON.parse(options.body);
+    } else if(url.startsWith("/api/studio/projects/") && options.method==="GET") {
+      data=state.plans[url.split("/").pop()];
+    } else if(url==="/api/studio/import" || url==="/api/studio/capture") {
+      data=state.imported;
+    } else if(["/api/macro/stop","/api/agent/stop"].includes(url) || url.endsWith("/play")) {
+      data={ok:true};
     } else if(url==="/api/studio/player/upload" || url==="/api/studio/player/control") {
       const payload=JSON.parse(options.body);
       data={id:taskID,controller:payload.controller,command:payload.command,
@@ -61,7 +70,7 @@ function page(state, {player=false,controller="usb-s3"} = {}) {
     } else throw new Error(`Unexpected request ${url}`);
     return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
   };
-  const context=vm.createContext({document:{getElementById:get,addEventListener(){},querySelectorAll(){return []},
+  const context=vm.createContext({document:{getElementById:id=>elements.get(id) || null,addEventListener(){},querySelectorAll(){return []},
     createElement(){return {addEventListener(){},setAttribute(){}}}},fetch,
     Option:class {constructor(text,value){this.text=text;this.value=value}},
     setInterval(){},setTimeout(){},clearTimeout(){}});
@@ -372,3 +381,222 @@ test("BLE arm clears maintenance confirmation before waiting for history refresh
   assert.equal(app.requests.length,before);assert.match(app.get("message").textContent,/持久维护/);
   resume();await pending;
 });
+
+function plan(id=flashID, name="recording A") {
+  return {id,name,loops:1,startup_ms:10000,device:{name:`device ${name}`,family:"ipad",connector:"usb-c",orientation:"portrait",width:754,height:1080},
+    steps:[{do:"tap",x:.3,y:.4,wait_ms:500}]};
+}
+function deferred() { let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve}; }
+function choose(app,id) {app.get("projects").value=id;return app.get("projects").fire("change");}
+
+for(const button of ["upload-recording","arm-player","play"]) {
+  test(`${button}: delayed save locks every project entry through the dependent POST`,async()=>{
+    const gate=deferred(), state={jobs:[],details:{},status:{screen:true,device:true,pointer_mode:"absolute",aspect:754/1080,macro:{}},
+      beforeResponse:async(url,options)=>{if(options.method==="PUT")await gate.promise}};
+    const app=page(state,{player:true});await app.ready();preparePlayer(app);
+    app.run(`fillProject(${JSON.stringify(plan())})`);
+    const pending=app.get(button).fire();await app.ready();
+    for(const id of ["projects","import","import-file","capture","record","name","loops","startup","save","build","build-desktop","play","export","download-recording"])
+      assert.equal(app.get(id).disabled,true,`${id} stays locked`);
+    await app.run("pollStatus()");assert.equal(app.get("record").disabled,true);
+    const before=app.requests.length;
+    await choose(app,olderID);await app.get("capture").fire();await app.get("import").fire();await app.get("record").fire();
+    app.get("import-file").files=[{size:20,text:async()=>JSON.stringify(plan(olderID))}];
+    await app.get("import-file").fire("change");
+    assert.equal(app.requests.length,before);
+    assert.throws(()=>app.run(`fillProject(${JSON.stringify(plan(olderID,"B"))})`),/正在保存/);
+    assert.equal(app.get("projects").value,flashID);
+    gate.resolve();await pending;
+    const sent=app.requests.find(r=>r.url===(button==="play"?`/api/studio/projects/${flashID}/play`:`/api/studio/player/${button==="upload-recording"?"upload":"control"}`));
+    assert.ok(sent);assert.equal(app.run("project.id"),flashID);assert.equal(app.get("name").value,"recording A");
+    if(button!=="play") {
+      assert.equal(JSON.parse(sent.options.body).project_id,flashID);
+      assert.equal(app.get("projects").disabled,true,"queued board task retains project lock");
+      state.details[taskID]={...state.details[taskID],status:"failed",command_sent:false,stage:"未发送"};
+      await app.run("pollJob()");
+    }
+    assert.equal(app.get("projects").disabled,false);
+    assert.equal(app.get("device-name").disabled,true,"saved device profile remains readonly");
+  });
+}
+
+for(const tamper of ["project="+JSON.stringify(plan(olderID,"B")),"project.steps[0].wait_ms=900", "projectRevision++"]) {
+  test(`save response cannot overwrite a changed project/revision (${tamper.slice(0,30)})`,async()=>{
+    const gate=deferred();const app=page({jobs:[],details:{},beforeResponse:async(url,options)=>{if(options.method==="PUT")await gate.promise}},{player:true});
+    await app.ready();preparePlayer(app);
+    const pending=app.get("upload-recording").fire();await app.ready();app.run(tamper);
+    const snapshot=app.run("JSON.stringify(project)");gate.resolve();await pending;
+    assert.equal(app.run("JSON.stringify(project)"),snapshot);
+    assert.ok(!app.requests.some(r=>r.url==="/api/studio/player/upload"));
+    assert.match(app.get("message").textContent,/项目或参数已改变/);
+    assert.equal(app.get("projects").disabled,false);
+  });
+}
+
+test("out-of-order project GETs, including A→B→A, only apply the latest selection",async()=>{
+  const gates=[deferred(),deferred(),deferred()];let index=0;
+  const state={jobs:[],details:{},plans:{[flashID]:plan(),[olderID]:plan(olderID,"B")},
+    beforeResponse:async(url,options)=>{if(url.startsWith("/api/studio/projects/") && options.method==="GET")await gates[index++].promise}};
+  const app=page(state,{player:true});await app.ready();
+  const first=choose(app,flashID), second=choose(app,olderID), third=choose(app,flashID);
+  gates[2].resolve();await third;
+  assert.equal(app.get("name").value,"recording A");assert.equal(app.run("projectLoading"),false);
+  state.plans[flashID]=plan(flashID,"obsolete A");
+  gates[1].resolve();await second;gates[0].resolve();await first;
+  assert.equal(app.get("projects").value,flashID);assert.equal(app.run("project.id"),flashID);
+  assert.equal(app.get("name").value,"recording A");assert.equal(app.get("device-name").value,"device recording A");
+});
+
+test("pending project GET blocks save/upload and choosing new project discards its response",async()=>{
+  const gate=deferred(), app=page({jobs:[],details:{},plans:{[olderID]:plan(olderID,"B")},
+    beforeResponse:async url=>{if(url===`/api/studio/projects/${olderID}`)await gate.promise}},{player:true});
+  await app.ready();preparePlayer(app);
+  const pending=choose(app,olderID);const before=app.requests.length;
+  await app.get("upload-recording").fire();assert.equal(app.requests.length,before);
+  await choose(app,"");gate.resolve();await pending;
+  assert.equal(app.run("project"),null);assert.equal(app.get("projects").value,"");
+  assert.equal(app.get("device-name").disabled,false);
+});
+
+test("slow status refresh cannot reset a newer project selection or visible device",async()=>{
+  const gate=deferred(),state={jobs:[],details:{},projects:[plan(),plan(olderID,"B")],plans:{[olderID]:plan(olderID,"B")}};
+  const app=page(state);await app.ready();
+  state.beforeResponse=async url=>{if(url==="/api/studio/status")await gate.promise};
+  const refresh=app.run("refresh()");await choose(app,olderID);gate.resolve();await refresh;
+  assert.equal(app.get("projects").value,olderID);assert.equal(app.get("name").value,"B");
+  assert.equal(app.get("device-name").value,"device B");
+});
+
+for(const field of ["ssid","password","host","device-port"]) {
+  test(`editing ${field} invalidates an already completed network build and rejects flash`,async()=>{
+    const app=page(universal());await app.ready();app.get("ssid").value="old";app.get("host").value="192.0.2.10";
+    await app.run('launchBuild("offline")');assert.equal(app.get("flash").disabled,false);
+    app.get(field).value=field==="device-port"?"7500":"new";await app.get(field).fire("input");
+    assert.equal(app.get("flash").disabled,true);assert.equal(app.get("download").hidden,true);
+    app.get("port").value="/dev/MOCK-ONLY";await app.get("flash").fire();
+    assert.ok(!app.requests.some(r=>r.url==="/api/studio/flash"));
+  });
+  test(`editing ${field} while build POST is pending rejects its eventual result`,async()=>{
+    const gate=deferred();const state=universal({beforeResponse:async url=>{if(url==="/api/studio/build")await gate.promise}});
+    const app=page(state);await app.ready();app.get("ssid").value="old";app.get("password").value="sent-secret";
+    const build=app.run('launchBuild("offline")');await app.ready();
+    app.get(field).value=field==="device-port"?"7500":"new";await app.get(field).fire("input");
+    gate.resolve();await build;
+    assert.equal(app.run("currentBuild"),null);assert.equal(app.get("flash").disabled,true);
+    assert.match(app.get("job-state").textContent,/网络配置已改变/);
+    assert.equal(app.get("password").value,field==="password"?"new":"sent-secret","never erase newer edits");
+  });
+}
+
+test("network edit then revert during queued build stays invalid, while automatic password clearing is valid",async()=>{
+  const state=universal();state.details[taskID].status="running";
+  const app=page(state);await app.ready();app.get("ssid").value="old";app.get("password").value="secret";
+  const before=app.run("networkRevision");await app.run('launchBuild("offline")');
+  assert.equal(app.get("password").value,"");assert.equal(app.run("networkRevision"),before);
+  app.get("host").value="changed";await app.get("host").fire("input");app.get("host").value="";await app.get("host").fire("input");
+  state.details[taskID].status="succeeded";await app.run("pollJob()");
+  assert.equal(app.get("flash").disabled,true);assert.match(app.get("job-state").textContent,/网络配置已改变/);
+});
+
+test("flash also compares the current network snapshot when no input event fires",async()=>{
+  const app=page(universal());await app.ready();await app.run('launchBuild("offline")');
+  app.get("host").value="192.0.2.20";app.get("port").value="/dev/MOCK-ONLY";await app.get("flash").fire();
+  assert.ok(!app.requests.some(r=>r.url==="/api/studio/flash"));assert.match(app.get("message").textContent,/网络配置已改变/);
+});
+
+for(const command of ["arm","desktop"]) {
+  test(`BLE ${command}: confirmation expires before POST reply; lost reply warns without retry`,async()=>{
+    const gate=deferred();const state={jobs:[],details:{},beforeResponse:async url=>{
+      if(url==="/api/studio/player/control"){await gate.promise;throw new Error("reply lost")}}};
+    const app=page(state,{player:true,controller:"ble-esp32"});await app.ready();preparePlayer(app);
+    const pending=app.get(command==="arm"?"arm-player":"desktop-player").fire();await app.ready();
+    assert.equal(app.get("player-detached").checked,false);assert.equal(app.get("projects").disabled,true);
+    gate.resolve();await pending;
+    assert.match(app.get("player-result").textContent,/状态未知.*可能已执行.*可能已运行.*BOOT.*持久维护/);
+    assert.equal(app.requests.filter(r=>r.url==="/api/studio/player/control").length,1);
+    const before=app.requests.length;await app.get("arm-player").fire();assert.equal(app.requests.length,before);
+  });
+  for(const outcome of ["failed","unknown","stopped","not-sent"]) {
+    test(`BLE ${command}: reloaded ${outcome} job accurately reports risk and maintenance`,async()=>{
+      const job={id:taskID,kind:"player-control",controller:"ble-esp32",command,status:outcome==="unknown"?"unknown":"failed",stage:"失败",error:"lost response",
+        command_sent:outcome!=="not-sent",maintenance_confirmation_invalidated:outcome!=="not-sent",control_uncertain:outcome!=="not-sent",
+        operation_state:outcome==="not-sent"?undefined:"unknown",may_be_running:outcome!=="stopped",
+        reconciliation:outcome==="stopped"?{status:"stopped",stop_attempted:true}:{status:"unknown",stop_attempted:false}};
+      const app=page({jobs:[job],details:{[taskID]:job}},{player:true,controller:"ble-esp32"});await app.ready();preparePlayer(app);
+      assert.equal(app.run("playerAttempts.size"),0,"test must not depend on in-memory request state");
+      await app.run(`activeJob='${taskID}';pollJob()`);
+      const text=app.get("player-result").textContent;
+      if(outcome==="not-sent") {assert.doesNotMatch(text,/可能已运行/);assert.equal(app.get("player-detached").checked,true);}
+      else {
+        assert.equal(app.get("player-detached").checked,false);
+        if(outcome==="stopped") {assert.match(text,/原命令未确认.*已核验软件停止.*重新物理维护确认.*BOOT/);assert.doesNotMatch(text,/可能已运行/);}
+        else assert.match(text,/状态未知.*可能已运行.*BOOT.*持久维护/);
+        assert.match(app.get("history-detail").textContent,outcome==="stopped"?/已核验软件停止/:/可能已运行/);
+      }
+      assert.equal(app.run("activeJob"),null);assert.ok(app.requests.every(r=>r.options.method==="GET"));
+    });
+  }
+}
+
+test("poll read failure after BLE arm warns of execution uncertainty without resending the command",async()=>{
+  const state={jobs:[],details:{},failJobReads:1};
+  const app=page(state,{player:true,controller:"ble-esp32"});await app.ready();preparePlayer(app);
+  await app.get("arm-player").fire();assert.equal(app.get("player-detached").checked,false);
+  assert.match(app.get("job-state").textContent,/可能已运行.*BOOT/);
+  assert.equal(app.get("projects").disabled,true,"unknown task retains project lock while GET retries");
+  await app.run("pollJob()");assert.equal(app.requests.filter(r=>r.url==="/api/studio/player/control").length,1);
+});
+
+for(const runtime of [null,{}, {...validRuntime,api_version:2},{...validRuntime,installed_matches_running:false},
+  {...validRuntime,installed_matches_running:"true"},{...validRuntime,capabilities:["runtime-version-handshake"]},
+  {...validRuntime,build_fingerprint:"invalid"}]) {
+  test(`incompatible runtime ${JSON.stringify(runtime)} blocks all mutations but permits stop`,async()=>{
+    const app=page({jobs:[],details:{},runtime},{player:true});await app.ready();preparePlayer(app);
+    assert.equal(app.run("runtimeReady"),false);assert.match(app.get("tools").textContent,/重启/);
+    for(const id of ["save","build","upload-recording","arm-player","desktop-player","record"])assert.equal(app.get(id).disabled,true);
+    for(const [url,method] of [["/api/studio/build","POST"],[`/api/studio/projects/${flashID}`,"PUT"],["/api/tap","POST"],["/api/studio/restore","POST"]])
+      await assert.rejects(app.run(`api('${url}',{},'${method}')`),/后台版本未通过核验/);
+    for(const id of ["save","build","upload-recording","arm-player","desktop-player"])await app.get(id).fire();
+    assert.ok(app.requests.every(r=>r.options.method==="GET"));
+    await app.get("stop").fire();assert.equal(app.requests.at(-1).url,"/api/macro/stop");
+  });
+}
+
+test("before handshake mutations are denied; valid refresh unlocks; later mismatch locks again",async()=>{
+  const gate=deferred(), state={jobs:[],details:{},beforeResponse:async url=>{if(url==="/api/studio/status")await gate.promise}};
+  const app=page(state,{player:true});
+  assert.equal(app.get("build").disabled,true);
+  await assert.rejects(app.run("api('/api/studio/build',{})"),/后台版本未通过核验/);
+  await app.get("stop").fire();assert.equal(app.requests.at(-1).url,"/api/macro/stop");
+  gate.resolve();await app.ready();assert.equal(app.run("runtimeReady"),true);assert.equal(app.get("build").disabled,false);
+  state.runtime={...validRuntime,installed_matches_running:false};await app.run("refresh()");
+  await app.run("pollStatus()");assert.equal(app.get("record").disabled,true);assert.equal(app.get("build").disabled,true);
+  state.runtime=validRuntime;await app.run("refresh()");assert.equal(app.get("build").disabled,false);
+});
+
+for(const restoreBeforeRelease of [false,true]) {
+  test(`transient runtime failure during save restores controls; handshake first=${restoreBeforeRelease}`,async()=>{
+    const gate=deferred();let failStatus=false;
+    const state={jobs:[],details:{},beforeResponse:async(url,options)=>{
+      if(url==="/api/studio/status" && failStatus)throw new Error("transient status failure");
+      if(options.method==="PUT")await gate.promise;
+    }};
+    const app=page(state,{player:true});await app.ready();app.run(`fillProject(${JSON.stringify(plan())})`);
+    const pending=app.run("save()");await app.ready();
+    failStatus=true;await assert.rejects(app.run("refresh()"),/transient/);
+    assert.equal(app.run("runtimeReady"),false);
+    failStatus=false;
+    if(restoreBeforeRelease) {
+      await app.run("refresh()");
+      assert.equal(app.run("runtimeReady"),true);
+      for(const id of ["save","build","import","capture","export"])assert.equal(app.get(id).disabled,true,`${id} remains project-locked`);
+    }
+    gate.resolve();await pending;
+    assert.equal(app.run("projectLock"),null);
+    if(!restoreBeforeRelease)await app.run("refresh()");
+    assert.equal(app.run("runtimeReady"),true);
+    for(const id of ["save","build","import","capture","export"])assert.equal(app.get(id).disabled,false,`${id} becomes usable`);
+    await app.get("save").fire();
+    assert.equal(app.requests.filter(r=>r.options.method==="PUT").length,2);
+  });
+}

@@ -42,6 +42,10 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setattr(module, "device", SimpleNamespace(connected=False))
     monkeypatch.setattr(module, "screen", SimpleNamespace(live=True, frame=b"jpeg", aspect=.46))
     monkeypatch.setattr(module, "manual_lock", asyncio.Lock())
+    monkeypatch.setattr(module, "manual_task", None)
+    monkeypatch.setattr(module, "stop_task", None)
+    monkeypatch.setattr(module, "manual_generation", 0)
+    monkeypatch.setattr(module, "stopping", False)
     return module, calls
 
 
@@ -125,10 +129,128 @@ def test_direct_action_and_agent_start_cannot_interleave(api, monkeypatch):
             assert not calls
             assert (await client.post("/api/agent/stop")).status_code == 200
             release.set()
-            assert (await pending).status_code == 200
+            assert (await pending).status_code == 409
             assert (await client.post("/api/agent", json={"text": "Open Clock"})).status_code == 200
             assert (await client.post("/api/type", json={"text": "Calendar"})).status_code == 409
-            assert calls == [("tap", .5, .4)]
+            assert calls == []
+
+    asyncio.run(scenario())
+
+
+def test_emergency_stop_waits_for_real_pointer_action_and_never_clicks_after_reset(api, tmp_path, monkeypatch):
+    import time
+
+    from hidagent.phone import Phone
+
+    module, _ = api
+
+    async def scenario():
+        positioned, cleanup, allow_cleanup = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        commands = []
+
+        class Device:
+            connected, absolute, links = True, True, 1
+
+            async def send(self, line):
+                commands.append(line)
+
+        class Screen:
+            live, frame, updated, aspect = True, b"frame", time.time(), .8
+            settles = 0
+
+            async def fresh(self, *_):
+                return self.frame
+
+            async def settled(self, **_):
+                self.settles += 1
+                if self.settles == 3:
+                    positioned.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        cleanup.set()
+                        await allow_cleanup.wait()
+
+        device, screen = Device(), Screen()
+        phone = Phone(device, tmp_path / "calibration.json", screen)
+        monkeypatch.setattr(module, "device", device)
+        monkeypatch.setattr(module, "screen", screen)
+        monkeypatch.setattr(module, "phone", phone)
+        monkeypatch.setattr("hidagent.phone.vision.absolute_pointer", lambda *_: (.595, .5))
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=module.app), base_url="http://test") as client:
+            pending = asyncio.create_task(client.post("/api/tap", json={"x": .5, "y": .5, "precise": True}))
+            await asyncio.wait_for(positioned.wait(), 1)
+            stop = asyncio.create_task(client.post("/api/agent/stop"))
+            await asyncio.wait_for(cleanup.wait(), 1)
+            assert not stop.done() and "home" not in commands
+            assert (await client.post("/api/tap", json={"x": .2, "y": .2})).status_code == 409
+            assert (await client.post("/api/agent", json={"text": "Open Clock"})).status_code == 409
+            allow_cleanup.set()
+            assert (await stop).status_code == 200
+            at_stop = commands.copy()
+            assert (await pending).status_code == 409
+            await asyncio.sleep(0)
+            assert commands == at_stop and commands[-2:] == ["release", "home"]
+            assert "click" not in commands and not module.manual_lock.locked()
+            # Stop does not permanently disable explicitly requested later actions.
+            assert (await client.post("/api/tap", json={"x": .2, "y": .2})).status_code == 200
+            assert commands[-1] == "click"
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_stop_waiter_does_not_abandon_release(api, monkeypatch):
+    module, _ = api
+
+    async def scenario():
+        resetting, finish = asyncio.Event(), asyncio.Event()
+
+        async def reset():
+            resetting.set()
+            await finish.wait()
+
+        monkeypatch.setattr(module, "device", SimpleNamespace(connected=True))
+        monkeypatch.setattr(module.phone, "reset", reset, raising=False)
+        waiter = asyncio.create_task(module.agent_stop())
+        await resetting.wait()
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert module.stopping and not module.stop_task.done()
+        finish.set()
+        await module.stop_task
+        assert not module.stopping
+
+    asyncio.run(scenario())
+
+
+def test_changed_backend_source_blocks_new_actions_but_preserves_emergency_stop(api, monkeypatch):
+    module, calls = api
+    monkeypatch.setattr(module.runtime_version, "runtime_is_current", lambda: False)
+    jobs = []
+
+    def start(kind, plan, **options):
+        jobs.append((kind, plan, options))
+        return {"id": "e" * 32, "kind": kind, "status": "queued"}
+
+    monkeypatch.setattr(module.studio_jobs, "start", start)
+
+    async def scenario():
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=module.app), base_url="http://test") as client:
+            blocked = await client.post("/api/tap", json={"x": .5, "y": .4})
+            assert blocked.status_code == 409 and "重新启动" in blocked.json()["detail"]
+            assert (await client.post("/api/studio/build", json={})).status_code == 409
+            assert (await client.get("/api/status")).status_code == 200
+            assert (await client.post("/api/agent/stop")).status_code == 200
+            assert (await client.post("/api/macro/stop")).status_code == 200
+            control = {"port": "/dev/MOCK-ONLY", "expected_mac": "02:00:00:00:00:01",
+                       "controller": "ble-esp32", "command": "stop"}
+            assert (await client.post("/api/studio/player/control", json=control)).status_code == 200
+            assert jobs[0][2]["command"] == "stop"
+            control["command"] = "arm"
+            assert (await client.post("/api/studio/player/control", json=control)).status_code == 409
+            assert len(jobs) == 1
+        assert not calls
 
     asyncio.run(scenario())
 

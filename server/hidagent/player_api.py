@@ -20,6 +20,8 @@ class Manage(StrictModel):
 
     @model_validator(mode="after")
     def safe_to_open(self):
+        if getattr(self, "command", None) == "stop":
+            return self
         if self.controller == "usb-s3" and not self.hid_disconnected:
             raise ValueError("操作前必须先拔下USB/HID并确认")
         if self.controller == "ble-esp32" and not self.maintenance_confirmed:

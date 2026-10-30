@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import Field
 
+from . import runtime_version
 from .controllers import PROFILES, Controller
 from .studio import DeviceProfile, Jobs, Project, Store, StrictModel, capture, check_id, ports, tools_status
 
@@ -83,6 +84,7 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
             pass
         return {
             "product": "AppleMobileRecorder",
+            "runtime": runtime_version.runtime_status(),
             "controllers": [{"id": key, **value} for key, value in PROFILES.items()],
             "data_fingerprint": hashlib.sha256(str(data_dir.resolve()).encode()).hexdigest(),
             "airplay_name": os.environ.get("AIRPLAY_NAME", "Apple Recorder"),
@@ -190,6 +192,11 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
             "command",
             "project_id",
             "controller",
+            "command_sent",
+            "control_uncertain",
+            "maintenance_confirmation_invalidated",
+            "operation_state",
+            "may_be_running",
         )
         for path in store.jobs.glob("*/job.json"):
             try:
@@ -202,6 +209,14 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
                 if not isinstance(job.get("created", 0), (int, float)):
                     continue
                 item = {key: job[key] for key in fields if key in job}
+                reconciliation = job.get("reconciliation")
+                if isinstance(reconciliation, dict):
+                    # Preserve safety evidence after a reload without exposing
+                    # transport exceptions or other private diagnostic text.
+                    item["reconciliation"] = {
+                        key: reconciliation[key]
+                        for key in ("status", "stop_attempted") if key in reconciliation
+                    }
                 item["id"] = identity
                 item["backup_ready"] = job.get("kind") == "flash" and job.get("backup_ready") is True
                 backup = path.parent / "backup"

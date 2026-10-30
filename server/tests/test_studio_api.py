@@ -157,6 +157,24 @@ def history_job(store, identity, *, kind="flash", status="succeeded", created=1,
     return job
 
 
+def test_history_preserves_control_uncertainty_and_stop_evidence_without_private_errors(studio_client):
+    client, store, _, _ = studio_client
+    job = history_job(store, "d" * 32, kind="player-control", status="failed")
+    job.update(
+        command="arm", controller="ble-esp32", command_sent=True, control_uncertain=True,
+        maintenance_confirmation_invalidated=True, operation_state="unknown", may_be_running=False,
+        reconciliation={"status": "stopped", "stop_attempted": True, "error": "PRIVATE-DIAGNOSTIC"},
+    )
+    atomic_json(store.jobs / job["id"] / "job.json", job)
+    response = client.get("/api/studio/jobs")
+    assert response.status_code == 200 and "PRIVATE" not in response.text
+    saved = response.json()[0]
+    for key in ("command", "command_sent", "control_uncertain", "maintenance_confirmation_invalidated",
+                "operation_state", "may_be_running"):
+        assert saved[key] == job[key]
+    assert saved["reconciliation"] == {"status": "stopped", "stop_attempted": True}
+
+
 def test_history_survives_fresh_api_registration_and_restores_selected_backup(studio_client, monkeypatch):
     client, store, jobs, macro = studio_client
     older = history_job(store, "a" * 32, created=1, backup=True)
