@@ -170,26 +170,26 @@ static void storeTests() {
   assert(intact.commit(invalid.data(), invalid.size()) && malformed.calls == 0);
 }
 
-static const char *parse(const std::string &text, amr::Request &r) {
+static const char *parseText(const std::string &text, amr::Request &r) {
   std::vector<char> b(text.begin(), text.end()); b.push_back('\0'); return amr::parse(b.data(), r);
 }
 static void protocolTests() {
   amr::Request r;
   for (const char *s : {"info", "commit", "arm", "desktop", "stop", "abort", "read 0 128",
-                        "begin 56 1234aBcD", "begin 2096 00000000", "data 0 0012aBff"}) assert(!parse(s, r));
+                        "begin 56 1234aBcD", "begin 2096 00000000", "data 0 0012aBff"}) assert(!parseText(s, r));
   for (const char *s : {"", " info", "info ", "info x", "stop now", "info\r", "info\t", "read 0 0",
        "read 0 129", "read -1 1", "read 1x 1", "read 429496729600 1", "read 0 1 extra",
        "begin 55 00000000", "begin 57 00000000", "begin 2104 00000000", "begin 56 123",
-       "begin 56 0x123456", "data 0 0", "data 0 gg", "data 0 ", "data  0 00", "wat"}) assert(parse(s, r));
-  assert(parse("data 0 " + std::string(258, '0'), r));
-  assert(!parse("data 2096 " + std::string(256, 'a'), r) && r.length == 128);
-  assert(!parse("read 2096 128", r)); // syntax is legal; storage must still reject out-of-range
+       "begin 56 0x123456", "data 0 0", "data 0 gg", "data 0 ", "data  0 00", "wat"}) assert(parseText(s, r));
+  assert(parseText("data 0 " + std::string(258, '0'), r));
+  assert(!parseText("data 2096 " + std::string(256, 'a'), r) && r.length == 128);
+  assert(!parseText("read 2096 128", r)); // syntax is legal; storage must still reject out-of-range
   amr::Line line;
   for (char c : std::string("arm") + std::string(400, ' ') + "stop") assert(line.push(c) == amr::Line::Pending);
   assert(line.push('\n') == amr::Line::Rejected);
   for (char c : std::string("info\r")) assert(line.push(c) == amr::Line::Pending);
   assert(line.push('\n') == amr::Line::Complete && !strcmp(line.text, "info"));
-  assert(!parse(line.text, r));
+  assert(!parseText(line.text, r));
   line.push('a'); line.push('\0'); line.push('r'); line.push('m');
   assert(line.push('\n') == amr::Line::Rejected);
   for (size_t i = 0; i < amr::Line::capacity; ++i) line.push('x');
