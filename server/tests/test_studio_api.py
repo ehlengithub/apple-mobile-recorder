@@ -239,5 +239,8 @@ def test_universal_build_accepts_no_project_and_optional_network(studio_client, 
     assert client.post("/api/studio/build", json={"mode": "offline"}).status_code == 200
     network = {"ssid": "mock-wifi", "password": "mock-secret", "host": "192.0.2.10", "port": 7400}
     assert client.post("/api/studio/build", json={"mode": "offline", "network": network}).status_code == 200
-    assert calls == [("build", None, {"mode": "offline", "network": None}),
-                     ("build", None, {"mode": "offline", "network": network})]
+    assert calls == [("build", None, {"mode": "offline", "network": None, "controller": "usb-s3"}),
+                     ("build", None, {"mode": "offline", "network": network, "controller": "usb-s3"})]
+    assert client.post("/api/studio/build", json={"controller": "ble-esp32"}).status_code == 200
+    assert calls[-1][2]["controller"] == "ble-esp32"
+    assert client.post("/api/studio/build", json={"controller": "arbitrary-fqbn"}).status_code == 422

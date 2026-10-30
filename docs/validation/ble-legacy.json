@@ -1,0 +1,55 @@
+{
+  "date": "2026-10-30",
+  "source_commit": "a790fd2",
+  "scope": "legacy fixed-recording BLE firmware; not integrated player acceptance",
+  "hardware": "ESP32-D0WDQ6 rev1.1 / 4MB",
+  "target_device": "iPad14,3",
+  "nine_point_test": {
+    "rounds": 3,
+    "clicks": 27,
+    "all_hits_correct": true,
+    "max_error_css_px": 1.118,
+    "mean_error_css_px": 0.912,
+    "mean_test_action_s": 0.557,
+    "conditions": "Stable dedicated nine-point Safari page; checked live mirrored markers and page heartbeat before each click.",
+    "initial_trial": "Initial single click hit the correct button but its saved comparison coordinates were inconsistent; not counted as a passing round. Complete 3-round run repeated on stable page."
+  },
+  "offline_macro": {
+    "steps": 6,
+    "waits_ms": [
+      3000,
+      500,
+      500,
+      500,
+      500,
+      2588
+    ],
+    "expected_cycle_ms": 7588,
+    "settle_ms": 350,
+    "press_ms": 60,
+    "minimum_release_ms": 90,
+    "autostart_persisted": true,
+    "completed_rounds_observed_before_power_test": 13,
+    "period_s_observed": [
+      7.586,
+      7.59,
+      7.587,
+      7.588,
+      7.588,
+      7.588,
+      7.588,
+      7.588,
+      7.588,
+      7.59,
+      7.586,
+      7.588
+    ],
+    "period_mean_s": 7.588,
+    "user_business_confirmation": "两轮正常，蓝牙循环成功",
+    "independent_power_confirmation": "换普通电源后自动循环正常",
+    "power_test_method": "Paused after a full round before user moved power from Mac to a standalone supply; user verified reconnection and automatic looping.",
+    "Mac_USB_serial_absent_after_power_change": true
+  },
+  "new_player_physical_flash": false,
+  "new_player_actual_page_acceptance": false
+}

@@ -29,7 +29,7 @@ inline bool hex32(const char *p, uint32_t &value) {
   }
   return true;
 }
-enum class Op { Info, Read, Begin, Data, Commit, Arm, Desktop, Stop, Abort };
+enum class Op { Info, Read, Begin, Data, Commit, Arm, Desktop, Stop, Abort, Maintenance };
 struct Request {
   Op op = Op::Info;
   uint32_t offset = 0, length = 0, crc = 0;
@@ -48,7 +48,8 @@ inline const char *parse(char *line, Request &r) {
   }
   struct Named { const char *name; Op op; };
   const Named simple[] = {{"info", Op::Info}, {"commit", Op::Commit}, {"arm", Op::Arm},
-                         {"desktop", Op::Desktop}, {"stop", Op::Stop}, {"abort", Op::Abort}};
+                         {"desktop", Op::Desktop}, {"stop", Op::Stop}, {"abort", Op::Abort},
+                         {"maintenance", Op::Maintenance}};
   for (const auto &v : simple) if (!strcmp(tokens[0], v.name)) {
     if (count != 1) return "syntax";
     r.op = v.op; return nullptr;

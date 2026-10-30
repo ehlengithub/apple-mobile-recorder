@@ -12,7 +12,7 @@ jobs:
           python-version: '3.12'
       - run: uv sync --project server --all-extras --frozen
       - run: HIDAGENT_DATA=/tmp/apple-recorder-test server/.venv/bin/python -m pytest server/tests -q
-      - run: server/.venv/bin/ruff check server/hidagent/studio.py server/hidagent/studio_api.py server/hidagent/workbench.py server/hidagent/app.py server/hidagent/player.py server/hidagent/player_api.py server/tests/test_studio.py server/tests/test_studio_api.py server/tests/test_player.py server/tests/test_player_api.py server/tests/test_player_native.py
+      - run: server/.venv/bin/ruff check server/hidagent/controllers.py server/hidagent/studio.py server/hidagent/studio_api.py server/hidagent/workbench.py server/hidagent/app.py server/hidagent/player.py server/hidagent/player_api.py server/tests/test_studio.py server/tests/test_studio_api.py server/tests/test_player.py server/tests/test_player_api.py server/tests/test_player_native.py server/tests/test_bluetooth.py
       - run: node --check server/hidagent/static/studio.js
       - run: node --check server/hidagent/static/player.js
       - run: node --test server/tests/studio_ui.test.cjs

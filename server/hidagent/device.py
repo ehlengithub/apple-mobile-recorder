@@ -20,6 +20,7 @@ class Device:
         self._last = self._beat = 0.0
         self.links = 0  # bumped on every (re)connect, so gestures know to release and re-home
         self.absolute = False
+        self.transport = "usb"
 
     @property
     def connected(self) -> bool:
@@ -38,6 +39,7 @@ class Device:
             self._writer.close()
         self._reader, self._writer = reader, writer
         self.absolute = "absolute" in hello.split()
+        self.transport = "ble" if "ble" in hello.split() else "usb"
         self.links += 1
         self._last = self._beat = time.time()  # fresh link: nothing to keep awake yet
         log.info("board connected from %s %s", writer.get_extra_info("peername"), hello)

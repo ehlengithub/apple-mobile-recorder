@@ -3,6 +3,8 @@
 #include "player_format.h"
 #include "player_store.h"
 #include "player_protocol.h"
+#include "player_control.h"
+#include "player_ble_report.h"
 #include "replay_engine.h"
 #include <algorithm>
 #include <cassert>
@@ -175,9 +177,9 @@ static const char *parseText(const std::string &text, amr::Request &r) {
 }
 static void protocolTests() {
   amr::Request r;
-  for (const char *s : {"info", "commit", "arm", "desktop", "stop", "abort", "read 0 128",
+  for (const char *s : {"info", "commit", "arm", "desktop", "stop", "abort", "maintenance", "read 0 128",
                         "begin 56 1234aBcD", "begin 2096 00000000", "data 0 0012aBff"}) assert(!parseText(s, r));
-  for (const char *s : {"", " info", "info ", "info x", "stop now", "info\r", "info\t", "read 0 0",
+  for (const char *s : {"", " info", "info ", "info x", "stop now", "maintenance now", "info\r", "info\t", "read 0 0",
        "read 0 129", "read -1 1", "read 1x 1", "read 429496729600 1", "read 0 1 extra",
        "begin 55 00000000", "begin 57 00000000", "begin 2104 00000000", "begin 56 123",
        "begin 56 0x123456", "data 0 0", "data 0 gg", "data 0 ", "data  0 00", "wat"}) assert(parseText(s, r));
@@ -299,6 +301,183 @@ static void timingTests() {
   assert(ReplayEngine::due(2, UINT32_MAX-1));
 }
 
+struct ControlMock : Mock {
+  amr::AccessGate gate{true, true, 0};
+  bool savedMaintenance = true, ambiguousEnableFailure = false;
+  uint32_t epoch = 0;
+  int transientAt = -1;
+  bool blocked() {
+    if (transientAt >= 0 && calls >= transientAt) { ++epoch; mounted = false; transientAt = -1; }
+    return gate.blocked(mounted, epoch);
+  }
+  bool maintenance() { return savedMaintenance; }
+  bool writeMaintenance(bool value) {
+    const bool ok = before(value ? "maintenance" : "enable");
+    if (ok || (!value && ambiguousEnableFailure)) savedMaintenance = value;
+    if (ok) after();
+    return ok;
+  }
+};
+
+static void gateTests() {
+  amr::LinkEpochs epochs;
+  epochs.event(true); // accepted primary connection
+  const uint32_t primary = epochs.session.load();
+  epochs.event(false); epochs.event(false); // reject + disconnect unrelated peer
+  assert(epochs.management.load() == 3 && epochs.session.load() == primary);
+  epochs.event(true); // primary disconnect
+  assert(epochs.session.load() == primary + 1);
+  for (bool ble : {false, true}) {
+    amr::AccessGate gate{ble, true, 17};
+    assert(!gate.blocked(false, 17));
+    assert(gate.blocked(true, 17) && gate.blocked(false, 18));
+    gate.maintenance = false;
+    assert(gate.blocked(false, 17) == ble);
+    assert(gate.blocked(true, 17) && gate.blocked(false, 18));
+    gate.maintenance = true; gate.expectedEpoch = UINT32_MAX;
+    assert(!gate.blocked(false, UINT32_MAX) && gate.blocked(false, 0));
+  }
+}
+
+static void maintenanceTests() {
+  {
+    ControlMock io; amr::Store<ControlMock> store(io); assert(store.load());
+    amr::Maintenance<ControlMock> state(io, io.gate);
+    assert(!state.load(store) && io.gate.maintenance && state.durable);
+    assert(io.savedMaintenance && !io.savedArmed && !store.armed);
+    assert(io.writes == std::vector<std::string>({"maintenance", "disarm"}));
+    io.calls = 0; io.writes.clear();
+    assert(!state.enable(store, false));
+    assert(!io.gate.maintenance && !io.savedMaintenance && state.durable && store.armed && io.savedArmed);
+    assert(io.writes == std::vector<std::string>({"arm", "enable"}));
+    assert(state.enable(store, false)); // already active is not a management state
+    amr::Store<ControlMock> coldStore(io); assert(coldStore.load());
+    amr::Maintenance<ControlMock> cold(io, io.gate);
+    assert(!cold.load(coldStore) && !io.gate.maintenance && coldStore.armed);
+    assert(!state.enter(store) && io.gate.maintenance && !io.savedArmed);
+    io.calls = 0; io.writes.clear();
+    assert(!state.enable(store, true) && store.desktop && !store.armed && !io.savedArmed);
+    assert(io.writes == std::vector<std::string>({"disarm", "mode", "enable"}));
+    assert(!state.enter(store));
+    assert(!state.enable(store, false) && !store.desktop && store.armed);
+    // Commit is forbidden while active even after a connection has gone away.
+    const Bytes next = fixture(3); assert(store.commit(next.data(), next.size()));
+    assert(!state.enter(store)); io.gate.expectedEpoch = io.epoch;
+    assert(!store.commit(next.data(), next.size()));
+    assert(io.gate.maintenance && io.savedMaintenance && !io.savedArmed && !store.armed);
+    assert(!state.enable(store, false)); // subsequent explicit enable still works
+  }
+  for (bool desktop : {false, true}) {
+    const int stages = desktop ? 3 : 2;
+    for (int failed = 1; failed <= stages; ++failed) {
+      ControlMock io; amr::Store<ControlMock> store(io); assert(store.load());
+      amr::Maintenance<ControlMock> state(io, io.gate); assert(!state.load(store));
+      io.calls = 0; io.failAt = failed;
+      assert(state.enable(store, desktop));
+      assert(io.gate.maintenance && state.durable && io.savedMaintenance && !store.armed && !io.savedArmed);
+      io.failAt = -1;
+      amr::Store<ControlMock> rebootStore(io); rebootStore.load();
+      amr::Maintenance<ControlMock> reboot(io, io.gate); assert(!reboot.load(rebootStore));
+      assert(io.gate.maintenance && !rebootStore.armed);
+    }
+    for (int cut = 1; cut <= stages; ++cut) {
+      ControlMock io; amr::Store<ControlMock> store(io); assert(store.load());
+      amr::Maintenance<ControlMock> state(io, io.gate); assert(!state.load(store));
+      io.calls = 0; io.cutAt = cut;
+      bool seen = false;
+      try { state.enable(store, desktop); } catch (const PowerCut &) { seen = true; }
+      assert(seen); io.cutAt = -1;
+      amr::Store<ControlMock> rebootStore(io); rebootStore.load();
+      amr::Maintenance<ControlMock> reboot(io, io.gate); assert(!reboot.load(rebootStore));
+      // Only the LAST, fully committed enable is allowed to survive power loss.
+      assert(io.gate.maintenance == (cut != stages));
+      if (cut != stages) assert(!rebootStore.armed && io.savedMaintenance);
+      else assert(desktop ? rebootStore.desktop : rebootStore.armed);
+    }
+  }
+  // A readback failure after a write actually reached flash must roll back.
+  {
+    ControlMock io; amr::Store<ControlMock> store(io); assert(store.load());
+    amr::Maintenance<ControlMock> state(io, io.gate); assert(!state.load(store));
+    io.calls = 0; io.failAt = 2; io.ambiguousEnableFailure = true;
+    assert(state.enable(store, false) && io.savedMaintenance && !io.savedArmed && io.gate.maintenance);
+  }
+  // Each maintenance persistence failure blocks future enables. No "saved"
+  // claim is made until BOTH maintenance and disarm are confirmed.
+  for (int failed : {1, 2}) {
+    ControlMock io; amr::Store<ControlMock> store(io); assert(store.load());
+    amr::Maintenance<ControlMock> state(io, io.gate); io.failAt = failed;
+    assert(state.enter(store) && io.gate.maintenance && !state.durable && !store.armed);
+    assert(state.enable(store, false));
+  }
+  for (bool transient : {false, true}) {
+    ControlMock io; amr::Store<ControlMock> store(io); assert(store.load());
+    amr::Maintenance<ControlMock> state(io, io.gate); assert(!state.load(store));
+    io.calls = 0;
+    if (transient) io.transientAt = 1; else io.mountAt = 1;
+    assert(state.enable(store, false));
+    assert(io.gate.maintenance && io.savedMaintenance && !io.savedArmed && !store.armed);
+  }
+  {
+    ControlMock io; io.ready = false;
+    amr::Store<ControlMock> store(io); amr::Maintenance<ControlMock> state(io, io.gate);
+    assert(state.load(store) && io.gate.maintenance && !state.durable && !store.armed);
+    assert(state.enable(store, false));
+  }
+  {
+    ControlMock io; io.savedMaintenance = false; io.savedArmed = false;
+    amr::Store<ControlMock> store(io); assert(store.load());
+    amr::Maintenance<ControlMock> state(io, io.gate); assert(!state.load(store));
+    assert(io.gate.maintenance && io.savedMaintenance); // impossible enabled-offline state fails closed
+  }
+}
+
+static void bleReportAndRetryTests() {
+  assert(sizeof(BLE_ABSOLUTE_MAP) == 83);
+  assert(amr::crc32(BLE_ABSOLUTE_MAP, sizeof(BLE_ABSOLUTE_MAP)) == 0xf80985fau);
+  const auto value = playerBleReport(0x1234, 32767, 1, -127, 127);
+  const std::array<uint8_t, 7> expected = {{1, 0x34, 0x12, 0xff, 0x7f, 0x81, 0x7f}};
+  assert(value == expected);
+  assert(playerBleReport(32767, 0, 0) == absoluteReport(32767, 0, 0));
+  for (int failures = 0; failures <= 4; ++failures) {
+    int calls = 0; unsigned pauses = 0;
+    const bool result = amr::notifyBounded([] { return true; }, [&] { return ++calls > failures; },
+                                        [&](uint32_t ms) { assert(ms == 2); pauses += ms; });
+    assert(result == (failures < 4)); assert(calls == std::min(4, failures+1));
+    assert(pauses == unsigned(std::min(3, failures)*2));
+  }
+  for (bool accepted : {false, true}) {
+    bool valid = true; unsigned calls = 0, pauses = 0;
+    assert(!amr::notifyBounded([&] { return valid; }, [&] { ++calls; valid = false; return accepted; },
+                             [&](uint32_t ms) { pauses += ms; }));
+    assert(calls == 1 && pauses <= 2); // epoch/handle/ready loss never retries a replacement peer
+  }
+  bool called = false;
+  assert(!amr::notifyBounded([] { return false; }, [&] { called = true; return true; }, [](uint32_t) {}));
+  assert(!called);
+}
+
+static void bootButtonTests() {
+  for (bool ble : {false, true}) {
+    amr::BootButton button;
+    assert(button.tick(0, true, ble) == amr::BootButton::None);
+    assert(button.tick(29, true, ble) == amr::BootButton::None);
+    assert(button.tick(30, true, ble) == amr::BootButton::Stop);
+    assert(button.stopHeld());
+    assert(button.tick(1499, true, ble) == amr::BootButton::None);
+    assert(button.tick(1500, true, ble) == (ble ? amr::BootButton::EnterMaintenance : amr::BootButton::None));
+    assert(button.tick(5000, true, ble) == amr::BootButton::None);
+    assert(button.tick(5001, false, ble) == amr::BootButton::None);
+    assert(!button.stopHeld());
+    assert(button.tick(5010, true, ble) == amr::BootButton::None);
+    assert(button.tick(5040, true, ble) == amr::BootButton::Stop);
+  }
+  amr::BootButton wrap;
+  assert(wrap.tick(UINT32_MAX-20, true, true) == amr::BootButton::None);
+  assert(wrap.tick(9, true, true) == amr::BootButton::Stop);
+  assert(wrap.tick(1479, true, true) == amr::BootButton::EnterMaintenance);
+}
+
 int main() {
   formatTests(); puts("PASS AMR2 LE format, zlib vector, bounds, device/timing, all truncations and CRC");
   storeTests(); puts("PASS durable disarm, slot failures/readback, power cuts, atomic switch, active-only load, USB gates");
@@ -307,4 +486,8 @@ int main() {
   uploadSafetyTests(); puts("PASS begin -> abort/timeout/HID/malformed upload stays durably disarmed");
   timingTests(); puts("PASS original ReplayEngine 350/60/90ms, 500ms cadence, loops, BOOT/suspend/detach/hold");
   mutationTests(); puts("PASS 6000 file mutations and 4000 bounded serial byte streams");
+  gateTests(); puts("PASS USB/BLE level + epoch + maintenance access gates");
+  maintenanceTests(); puts("PASS BLE default hold, enter/arm/desktop, NVS failure/rollback, enable power cuts and connection races");
+  bleReportAndRetryTests(); puts("PASS accepted BLE descriptor/7-byte report, wheels preserve coordinates, bounded notify retries");
+  bootButtonTests(); puts("PASS BOOT 30ms stop, BLE-only 1500ms persistent-maintenance event, debounce and clock wrap");
 }

@@ -146,6 +146,7 @@ def favicon():
 def status():
     return {"device": device.connected, "screen": screen.live, "calibrated": phone.calibrated,
             "pointer_mode": "absolute" if getattr(phone, "absolute", False) else "relative",
+            "control_transport": getattr(device, "transport", "usb"),
             "debug": DEBUG, "trace": str(agent.trace.dir or ""), "aspect": round(screen.aspect, 4),
             "models": {"planner": agent.planner.model, "actor": agent.actor.model},
             "agent": {"running": agent.running, "task": agent.task, "steps": agent.steps},

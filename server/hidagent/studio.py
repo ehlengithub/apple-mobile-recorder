@@ -18,6 +18,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from .controllers import profile
+
 ROOT = Path(__file__).resolve().parents[2]
 FQBN = "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M"
 ID = re.compile(r"^[a-f0-9]{32}$")
@@ -340,7 +342,10 @@ class Jobs:
         threading.Thread(target=work, daemon=True).start()
         return job
 
-    def _build(self, job, project, mode="offline", network=None):
+    def _build(self, job, project, mode="offline", network=None, controller="usb-s3"):
+        target = profile(controller)
+        if controller != "usb-s3" and mode not in ("offline", "desktop"):
+            raise ValueError("旧固件模式不支持蓝牙控制器")
         tools = tools_status()
         if not tools["arduino"]:
             raise RuntimeError("未找到 arduino-cli，请先运行 scripts/setup-macos.sh")
@@ -348,10 +353,14 @@ class Jobs:
         out = folder / "firmware"
         if mode in ("offline", "desktop"):
             sketch = folder / "UniversalPlayer"
-            shutil.copytree(ROOT / "hardware/player", sketch, ignore=shutil.ignore_patterns("build", "README.md"))
+            shutil.copytree(
+                ROOT / "hardware/player", sketch, ignore=shutil.ignore_patterns("build", "README.md", "secrets.h")
+            )
             (sketch / "player.ino").rename(sketch / "UniversalPlayer.ino")
             shutil.copy2(ROOT / "hardware/offline_replay/replay_engine.h", sketch / "replay_engine.h")
             arguments = []
+            if controller == "ble-esp32":
+                arguments = ["--build-property", "compiler.cpp.extra_flags=-DAMR_BLE=1"]
             if network:
                 if not all(network.get(key) for key in ("ssid", "host")):
                     raise ValueError("电脑录制需要 Wi-Fi 名称和电脑的局域网地址")
@@ -397,15 +406,21 @@ class Jobs:
             arguments = ["--build-property", "compiler.cpp.extra_flags=-DABSOLUTE_POINTER=1"]
         else:
             raise ValueError("未知固件模式")
-        self._save(job, stage="编译固件（首次会比较慢）", mode=mode)
+        self._save(job, stage="编译固件（首次会比较慢）", mode=mode, controller=controller)
         self._run(
-            job, [tools["arduino"], "compile", "--fqbn", FQBN, "--output-dir", str(out), *arguments, str(sketch)], 600
+            job,
+            [tools["arduino"], "compile", "--fqbn", target["fqbn"], "--output-dir", str(out), *arguments, str(sketch)],
+            600,
         )
         binary = out / f"{sketch.name}.ino.bin"
         manifest = {
             "schema_version": 1,
             "mode": mode,
-            "fqbn": FQBN,
+            "fqbn": target["fqbn"],
+            "controller": controller,
+            "chip": target["chip"],
+            "transport": target["transport"],
+            "bootloader_offset": target["bootloader_offset"],
             "application_offset": 65536,
             "application_file": binary.name,
             "application_sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
@@ -426,7 +441,7 @@ class Jobs:
         atomic_json(folder / "manifest.json", manifest)
         self._save(job, manifest=manifest, stage="固件已生成；尚未写入板子")
 
-    def _flash(self, job, build_id, port, initialize=False):
+    def _flash(self, job, build_id, port, initialize=False, controller=None):
         build = self.get(build_id)
         if build.get("kind") != "build" or build.get("status") != "succeeded":
             raise ValueError("请先成功生成固件")
@@ -441,6 +456,13 @@ class Jobs:
             raise RuntimeError("未找到 esptool，请运行环境检查")
         source = self.store.jobs / build_id
         manifest = json.loads((source / "manifest.json").read_text())
+        built_controller = manifest.get("controller", "usb-s3")
+        target = profile(built_controller)
+        if controller is not None and controller != built_controller:
+            raise ValueError("所选控制器与生成固件的板型不同，禁止烧录")
+        for key in ("chip", "transport", "fqbn", "bootloader_offset"):
+            if manifest.get(key, target[key]) != target[key]:
+                raise ValueError("固件芯片或构建标记与板型不一致，禁止烧录")
         if manifest.get("project_id"):
             latest = self.store.get(manifest["project_id"])
             latest_hash = hashlib.sha256(json.dumps(latest.model_dump(), sort_keys=True).encode()).hexdigest()
@@ -450,12 +472,12 @@ class Jobs:
         binary = out / manifest["application_file"]
         if hashlib.sha256(binary.read_bytes()).hexdigest() != manifest["application_sha256"]:
             raise ValueError("固件文件已变化，禁止烧录，请重新生成")
-        base = [tools["esptool"], "--chip", "esp32s3", "--port", port, "--baud", "115200", "--no-stub"]
+        base = [tools["esptool"], "--chip", target["chip"], "--port", port, "--baud", "115200", "--no-stub"]
 
         def command(*args, after="no-reset", timeout=600):
             return self._run(job, [*base, "--after", after, *map(str, args)], timeout)
 
-        self._save(job, stage="识别 ESP32-S3（会停止现有程序）", build_id=build_id, port=port)
+        self._save(job, stage="识别板卡（会停止现有程序）", build_id=build_id, port=port, controller=built_controller)
         identity = command("chip-id")
         mac = re.search(r"MAC:\s*([0-9a-fA-F:]{17})", identity)
         if not mac:
@@ -486,6 +508,8 @@ class Jobs:
         if (backup / "application.bin").stat().st_size != app_size:
             raise ValueError("应用区备份读取不完整，未写入")
         restore = {
+            "controller": built_controller,
+            "chip": target["chip"],
             "mac": mac.group(1).lower(),
             "application_offset": 65536,
             "application_bytes": app_size,
@@ -509,7 +533,15 @@ class Jobs:
             )
             if not candidates:
                 raise RuntimeError("未找到 boot_app0.bin；保留备份，未初始化空板")
-            segments = ["0x0", str(bootloader), "0x8000", str(table), "0xe000", str(sorted(candidates)[-1]), *segments]
+            segments = [
+                hex(target["bootloader_offset"]),
+                str(bootloader),
+                "0x8000",
+                str(table),
+                "0xe000",
+                str(sorted(candidates)[-1]),
+                *segments,
+            ]
         output = command("write-flash", *segments, after="hard-reset")
         if "Hash of data verified" not in output:
             raise RuntimeError("未获得写入哈希校验确认，请保留备份检查板卡")
@@ -529,6 +561,10 @@ class Jobs:
             raise ValueError("请选择已连接的COM口")
         backup = self.store.jobs / flash_id / "backup"
         info = json.loads((backup / "restore.json").read_text())
+        controller = info.get("controller", "usb-s3")
+        target = profile(controller)
+        if info.get("chip", target["chip"]) != target["chip"]:
+            raise ValueError("备份芯片标记与板型不一致，禁止恢复")
         app = backup / "application.bin"
         boot = backup / "boot-and-partitions.bin"
         if hashlib.sha256(app.read_bytes()).hexdigest() != info["application_sha256"]:
@@ -538,8 +574,8 @@ class Jobs:
         executable = tools_status()["esptool"]
         if not executable:
             raise RuntimeError("未找到esptool")
-        base = [executable, "--chip", "esp32s3", "--port", port, "--baud", "115200", "--no-stub"]
-        self._save(job, stage="核对板卡身份，准备恢复", flash_id=flash_id, port=port)
+        base = [executable, "--chip", target["chip"], "--port", port, "--baud", "115200", "--no-stub"]
+        self._save(job, stage="核对板卡身份，准备恢复", flash_id=flash_id, port=port, controller=controller)
         identity = self._run(job, [*base, "--after", "no-reset", "chip-id"])
         mac = re.search(r"MAC:\s*([0-9a-fA-F:]{17})", identity)
         if not mac or mac.group(1).lower() != info["mac"]:
@@ -572,7 +608,7 @@ class Jobs:
             stage=("已恢复安装前的空板快照" if info["initialized_empty_board"] else "应用已恢复；原NVS数据未改写"),
         )
 
-    def _open_player(self, job, port, expected_mac):
+    def _open_player(self, job, port, expected_mac, controller="usb-s3"):
         from .player import Player
 
         if port not in {p["port"] for p in ports()}:
@@ -581,17 +617,18 @@ class Jobs:
             busy = subprocess.run(["lsof", "-t", port], capture_output=True, text=True)
             if busy.stdout.strip():
                 raise ValueError("COM串口被其他程序占用")
-        self._save(job, stage="核对播放器与板卡；USB/HID必须已断开", port=port, board_mac=expected_mac)
-        return Player(port, expected_mac)
+        profile(controller)
+        self._save(job, stage="核对播放器、板型与维护状态", port=port, board_mac=expected_mac, controller=controller)
+        return Player(port, expected_mac, controller=controller)
 
-    def _upload(self, job, project, port, expected_mac):
+    def _upload(self, job, project, port, expected_mac, controller="usb-s3"):
         from .player import encode_recording
 
         payload = encode_recording(project)
         folder = self.store.jobs / job["id"]
         (folder / "recording.amr").write_bytes(payload)
         atomic_json(folder / "project.json", project.model_dump())
-        player = self._open_player(job, port, expected_mac)
+        player = self._open_player(job, port, expected_mac, controller)
         try:
             old = player.read_recording(player.info)
             if old:
@@ -603,17 +640,17 @@ class Jobs:
                 recording=meta,
                 project_id=project.id,
                 armed=False,
-                stage="录制已上传并校验，保持待机；明确启用后再插USB/HID",
+                stage="录制已上传并校验，保持待机；明确启用后执行",
             )
         finally:
             player.close()
 
-    def _player_control(self, job, project, port, expected_mac, command):
+    def _player_control(self, job, project, port, expected_mac, command, controller="usb-s3"):
         from .player import encode_recording, validate_recording
 
         payload = encode_recording(project) if command == "arm" and project else None
         crc = validate_recording(payload)["crc"] if payload else ""
-        player = self._open_player(job, port, expected_mac)
+        player = self._open_player(job, port, expected_mac, controller)
         try:
             reply = player.control(command, crc, payload)
             self._save(job, player=reply, command=command, stage="播放器操作已确认")

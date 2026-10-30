@@ -1,6 +1,6 @@
 {
   "date": "2026-10-30",
-  "python_tests": 206,
+  "python_tests": 227,
   "cpp_scheduler": "passed",
   "javascript_syntax": "passed",
   "shell_syntax": "passed",
@@ -70,8 +70,8 @@
       "contains_network_credentials": true
     }
   },
-  "verification_round": "universal-player-v2",
-  "javascript_ui_tests": 14,
+  "verification_round": "unified-usb-ble-player",
+  "javascript_ui_tests": 30,
   "v2_ui_test_method": "isolated Node VM DOM/fetch mocks; no user browser touched",
   "v2_cpp": {
     "asan_ubsan": "passed",
@@ -80,8 +80,101 @@
     "storage_failure_and_power_cut_model": "passed",
     "timing": "unchanged ReplayEngine 350/60/90ms, minimum500ms"
   },
-  "v2_native_integration": "real Python encoding/transport against native C++ firmware parser/store: 1 and 256 steps, upload/readback/arm/desktop/reupload",
+  "v2_native_integration": "Real Python encoder and transport to shared native C++ parser/store/maintenance policy: USB and BLE, 1/256 steps, upload/readback/arm/maintenance/desktop/reupload.",
   "firmware_builds": {
+    "usb_offline": {
+      "schema_version": 1,
+      "mode": "offline",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "controller": "usb-s3",
+      "chip": "esp32s3",
+      "transport": "usb",
+      "bootloader_offset": 0,
+      "application_offset": 65536,
+      "application_file": "UniversalPlayer.ino.bin",
+      "application_sha256": "1887a049c95f70b8c1681a3def3030144738682d28d89f3ad5ad0b7d3c518b75",
+      "bytes": 397360,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "contains_network_credentials": false,
+      "recording_protocol": 2,
+      "status": "succeeded"
+    },
+    "usb_wifi": {
+      "schema_version": 1,
+      "mode": "desktop",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "controller": "usb-s3",
+      "chip": "esp32s3",
+      "transport": "usb",
+      "bootloader_offset": 0,
+      "application_offset": 65536,
+      "application_file": "UniversalPlayer.ino.bin",
+      "application_sha256": "6b32116d6334f17dfa38b4eaeb596f4c01ba2bb60f5d6d2568003ed3c220d9c0",
+      "bytes": 966864,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "contains_network_credentials": true,
+      "recording_protocol": 2,
+      "status": "succeeded"
+    },
+    "ble_offline": {
+      "schema_version": 1,
+      "mode": "offline",
+      "fqbn": "esp32:esp32:esp32:FlashSize=4M,FlashMode=dio,FlashFreq=40",
+      "controller": "ble-esp32",
+      "chip": "esp32",
+      "transport": "ble",
+      "bootloader_offset": 4096,
+      "application_offset": 65536,
+      "application_file": "UniversalPlayer.ino.bin",
+      "application_sha256": "7445fc20341af7c1ad81269e6e81a6d188b67d36717abe768e03c58a201f729e",
+      "bytes": 602528,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "contains_network_credentials": false,
+      "recording_protocol": 2,
+      "status": "succeeded"
+    },
+    "ble_wifi": {
+      "schema_version": 1,
+      "mode": "desktop",
+      "fqbn": "esp32:esp32:esp32:FlashSize=4M,FlashMode=dio,FlashFreq=40",
+      "controller": "ble-esp32",
+      "chip": "esp32",
+      "transport": "ble",
+      "bootloader_offset": 4096,
+      "application_offset": 65536,
+      "application_file": "UniversalPlayer.ino.bin",
+      "application_sha256": "68710569c4bbe0dcfa471cdf7fee93d30bb7bb986903ef44d8658c15f8953ac6",
+      "bytes": 1159568,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "contains_network_credentials": true,
+      "recording_protocol": 2,
+      "status": "succeeded"
+    }
+  },
+  "v2_hardware_upload_performed": false,
+  "v2_actual_page_acceptance": false,
+  "fixed_review_findings": [
+    "real Macro playback executes on ASGI event loop",
+    "restore reads current partition and refuses changed layout",
+    "persisted job history restores UI recovery path and retries transient polls"
+  ],
+  "baseline_usb_v2_builds": {
     "universal_offline": {
       "schema_version": 1,
       "mode": "offline",
@@ -117,11 +210,18 @@
       "status": "succeeded"
     }
   },
-  "v2_hardware_upload_performed": false,
-  "v2_actual_page_acceptance": false,
-  "fixed_review_findings": [
-    "real Macro playback executes on ASGI event loop",
-    "restore reads current partition and refuses changed layout",
-    "persisted job history restores UI recovery path and retries transient polls"
-  ]
+  "native_integration_controllers": [
+    "usb-s3",
+    "ble-esp32"
+  ],
+  "ble_legacy_evidence": "validation/ble-legacy.json",
+  "usb_legacy_3s_evidence": "validation/usb-legacy-3s.json",
+  "ble_integration": {
+    "descriptor_identical_to_accepted_legacy": true,
+    "new_hardware_flash_performed": false,
+    "new_actual_page_acceptance": false,
+    "maintenance_failures_and_power_cuts": "passed in native policy tests",
+    "notify_retries": "4 attempts, 2ms between failed attempts; stop if link/session changes",
+    "management_session_epochs_separated": true
+  }
 }

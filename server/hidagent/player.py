@@ -9,6 +9,8 @@ import struct
 import time
 import zlib
 
+from .controllers import profile
+
 HEADER = struct.Struct("<4sHHIIIHHBBH16s")
 STEP = struct.Struct("<HHI")
 MAX_BYTES = HEADER.size + 256 * STEP.size + 4
@@ -71,7 +73,8 @@ def validate_recording(data):
 class Player:
     """Only call after the user disconnects HID. Serial open may reset a board."""
 
-    def __init__(self, port, expected_mac, serial_factory=None):
+    def __init__(self, port, expected_mac, serial_factory=None, *, controller="usb-s3"):
+        self.target = profile(controller)
         if not MAC.fullmatch(expected_mac):
             raise ValueError("请填写已核对的板卡MAC")
         self.expected_mac = expected_mac
@@ -97,6 +100,16 @@ class Player:
             raise ValueError("当前固件不是通用播放器v2，请先安装一次播放器")
         if info.get("mac") != self.expected_mac:
             raise ValueError("板卡MAC不匹配，未写入录制")
+        if info.get("transport", "usb") != self.target["transport"] or (
+            info.get("chip", "esp32s3") != self.target["chip"]
+        ):
+            raise ValueError("播放器芯片或控制方式与所选板型不一致，禁止操作")
+        if self.target["transport"] == "ble" and (
+            info.get("maintenance") is not True
+            or info.get("maintenance_saved") is not True
+            or info.get("connected") is not False
+        ):
+            raise ValueError("蓝牙板未进入维护模式：保持供电长按BOOT两秒后再操作")
         if info.get("mounted") is not False:
             raise ValueError("请先拔下USB/HID与iPhone/iPad的连接，再操作播放器")
         size = info.get("size")

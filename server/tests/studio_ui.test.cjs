@@ -10,7 +10,7 @@ const flashID = "a".repeat(32), olderID = "b".repeat(32), taskID = "c".repeat(32
 function flash(id, created=1, status="succeeded") {
   return {id,created,kind:"flash",status,stage:"完成",backup_ready:true,backup_available:true,board_mac:"00:11:22:33:44:55"};
 }
-function page(state, {player=false} = {}) {
+function page(state, {player=false,controller="usb-s3"} = {}) {
   const elements = new Map();
   function addElements(markup) {
     for(const match of markup.matchAll(/<[^>]*\bid="([^"]+)"[^>]*>/g)) {
@@ -29,13 +29,15 @@ function page(state, {player=false} = {}) {
   }
   addElements(html);
   const get=id=>{assert.ok(elements.has(id),`missing DOM id ${id}`);return elements.get(id)};
+  get("controller").value=controller;
   let fails=state.failJobReads || 0;
   const requests=[];
   const fetch=async(url,options={})=>{
     requests.push({url,options});
+    if(state.beforeResponse)await state.beforeResponse(url,options);
     let data;
     if(url==="/api/studio/status") data={projects:[],ports:[{port:"/dev/MOCK-ONLY",description:"mock"}],tools:{},device_port:7400};
-    else if(url==="/api/status") data={screen:false,device:false,macro:{}};
+    else if(url==="/api/status") data=state.status || {screen:false,device:false,macro:{}};
     else if(url==="/api/studio/jobs") data=state.jobs;
     else if(url.startsWith("/api/studio/jobs/")) {
       if(fails-- > 0)throw new Error("temporary disconnect");
@@ -46,10 +48,15 @@ function page(state, {player=false} = {}) {
       state.details[taskID]=data;
     } else if(url==="/api/studio/build") {
       data=state.details[taskID];
+    } else if(url==="/api/studio/flash") {
+      data={id:taskID,kind:"flash",status:"queued",stage:"排队"};
+      state.details[taskID]=data;
     } else if(url.startsWith("/api/studio/projects/") && options.method==="PUT") {
       data=JSON.parse(options.body);
     } else if(url==="/api/studio/player/upload" || url==="/api/studio/player/control") {
-      data={id:taskID,kind:url.endsWith("upload")?"upload":"player-control",status:"queued",stage:"排队"};
+      const payload=JSON.parse(options.body);
+      data={id:taskID,controller:payload.controller,command:payload.command,
+        kind:url.endsWith("upload")?"upload":"player-control",status:"queued",stage:"排队"};
       state.details[taskID]=data;
     } else throw new Error(`Unexpected request ${url}`);
     return {ok:true,json:async()=>JSON.parse(JSON.stringify(data))};
@@ -114,7 +121,7 @@ function universal(state={}) {
 test("universal player builds without a project or Wi-Fi; summary does not claim zero-step playback",async()=>{
   const app=page(universal());await app.ready();await app.run('launchBuild("offline")');
   const request=app.requests.find(r=>r.url==="/api/studio/build");
-  assert.deepEqual(JSON.parse(request.options.body),{mode:"offline",project_id:null});
+  assert.deepEqual(JSON.parse(request.options.body),{mode:"offline",project_id:null,controller:"usb-s3"});
   assert.match(app.get("firmware-summary").textContent,/通用播放器 v2 · 录制单独上传/);
   assert.doesNotMatch(app.get("firmware-summary").textContent,/0步|0\.000秒/);
   assert.match(app.get("job-state").textContent,/无需重新编译/);
@@ -198,7 +205,7 @@ for(const [button,route,command] of [["upload-recording","upload",null],["arm-pl
     assert.equal(calls[0].options.method,"PUT");
     const saved=JSON.parse(calls[0].options.body);
     assert.equal(saved.name,"edited recording");assert.equal(saved.loops,2);assert.equal(saved.startup_ms,5000);
-    const payload={port:"/dev/MOCK-ONLY",expected_mac:"00:11:22:33:44:55",hid_disconnected:true,project_id:flashID};
+    const payload={port:"/dev/MOCK-ONLY",expected_mac:"00:11:22:33:44:55",controller:"usb-s3",hid_disconnected:true,project_id:flashID};
     if(command)payload.command=command;
     assert.equal(calls[1].options.method,"POST");
     assert.deepEqual(JSON.parse(calls[1].options.body),payload);
@@ -207,3 +214,161 @@ for(const [button,route,command] of [["upload-recording","upload",null],["arm-pl
     assert.equal(app.get("job-state").textContent,"排队");
   });
 }
+
+test("BLE build carries its controller and flash request matches the generated binary",async()=>{
+  const state=universal();state.details[taskID].manifest.controller="ble-esp32";
+  const app=page(state,{controller:"ble-esp32"});await app.ready();
+  await app.run('launchBuild("offline")');
+  const build=app.requests.find(request=>request.url==="/api/studio/build");
+  assert.deepEqual(JSON.parse(build.options.body),{mode:"offline",project_id:null,controller:"ble-esp32"});
+  assert.match(app.get("firmware-summary").textContent,/BLE/);
+  app.get("port").value="/dev/MOCK-ONLY";
+  await app.get("flash").fire();
+  const write=app.requests.find(request=>request.url==="/api/studio/flash");
+  assert.equal(JSON.parse(write.options.body).controller,"ble-esp32");
+});
+
+test("USB flash requests explicitly carry usb-s3",async()=>{
+  const app=page(universal());await app.ready();await app.run('launchBuild("offline")');
+  app.get("port").value="/dev/MOCK-ONLY";await app.get("flash").fire();
+  assert.equal(JSON.parse(app.requests.find(r=>r.url==="/api/studio/flash").options.body).controller,"usb-s3");
+});
+
+function preparePlayer(app) {
+  const plan={id:flashID,name:"BLE clicks",loops:1,startup_ms:10000,
+    device:{name:"mock iPad",family:"ipad",width:754,height:1080},
+    steps:[{do:"tap",x:0.3,y:0.4,wait_ms:500}]};
+  app.run(`project=${JSON.stringify(plan)}`);
+  app.get("name").value=plan.name;app.get("loops").value="1";app.get("startup").value="10";
+  app.get("port").value="/dev/MOCK-ONLY";app.get("player-mac").value="00:11:22:33:44:55";
+  app.get("player-detached").checked=true;
+}
+
+for(const [button,route,command] of [["upload-recording","upload",null],["arm-player","control","arm"],
+  ["desktop-player","control","desktop"]]) {
+  test(`BLE ${button} requires persistent maintenance and sends the BLE contract`,async()=>{
+    const app=page({jobs:[],details:{}},{player:true,controller:"ble-esp32"});await app.ready();
+    preparePlayer(app);app.get("player-detached").checked=false;
+    const before=app.requests.length;await app.get(button).fire();
+    assert.equal(app.requests.length,before);
+    assert.match(app.get("message").textContent,/BOOT 2 秒.*持久维护/);
+    app.get("player-detached").checked=true;await app.get(button).fire();
+    const request=app.requests.find(r=>r.url===`/api/studio/player/${route}`);
+    const expected={port:"/dev/MOCK-ONLY",expected_mac:"00:11:22:33:44:55",controller:"ble-esp32",maintenance_confirmed:true};
+    if(command)expected.command=command;
+    if(command !== "desktop")expected.project_id=flashID;
+    assert.deepEqual(JSON.parse(request.options.body),expected);
+    const saved=app.requests.find(r=>r.options.method==="PUT");
+    if(saved) {
+      assert.ok(!("controller" in JSON.parse(saved.options.body).device));
+      assert.ok(!("controller" in JSON.parse(saved.options.body)));
+    }
+    assert.equal(app.run("activeJob"),taskID);
+  });
+}
+
+for(const controller of ["usb-s3","ble-esp32"]) {
+  for(const command of ["arm","desktop"]) {
+    test(`${controller} successful ${command} invalidates the physical confirmation`,async()=>{
+      const job={id:taskID,kind:"player-control",controller,command,status:"succeeded",stage:"完成",created:1};
+      const state={jobs:[job],details:{[taskID]:job}};
+      const app=page(state,{player:true,controller});await app.ready();
+      preparePlayer(app);await app.run(`activeJob='${taskID}';pollJob()`);
+      assert.equal(app.get("player-detached").checked,false);
+      if(controller === "ble-esp32") {
+        assert.match(app.get("player-result").textContent,command === "arm"?/自动蓝牙连接.*倒计时.*启用前.*起始页/:/退出维护.*蓝牙广播/);
+        const before=app.requests.length;await app.get("upload-recording").fire();
+        assert.equal(app.requests.length,before);
+        assert.match(app.get("message").textContent,/持久维护/);
+      } else assert.match(app.get("player-result").textContent,/USB\/HID/);
+    });
+  }
+}
+
+test("switching controllers clears MAC, confirmation and generic build without probing hardware",async()=>{
+  const app=page(universal(),{player:true});await app.ready();await app.run('launchBuild("offline")');
+  preparePlayer(app);const originalProfile=app.run("JSON.stringify(project.device)");
+  const before=app.requests.length;
+  app.get("controller").value="ble-esp32";await app.get("controller").fire("change");
+  assert.equal(app.get("player-mac").value,"");assert.equal(app.get("player-detached").checked,false);
+  assert.equal(app.run("currentBuild"),null);assert.equal(app.get("flash").disabled,true);
+  assert.equal(app.get("download").hidden,true);assert.equal(app.get("firmware-summary").hidden,true);
+  assert.match(app.get("player-confirmation").textContent,/持久维护/);
+  assert.match(app.get("controller-preview-hint").textContent,/BLE.*不提供键盘/);
+  assert.equal(app.run("JSON.stringify(project.device)"),originalProfile);
+  await app.get("flash").fire();assert.equal(app.requests.length,before);
+  app.get("player-mac").value="aa:bb:cc:dd:ee:ff";app.get("player-detached").checked=true;
+  app.get("controller").value="usb-s3";await app.get("controller").fire("change");
+  assert.equal(app.get("player-mac").value,"");assert.equal(app.get("player-detached").checked,false);
+  assert.match(app.get("player-confirmation").textContent,/USB\/HID/);
+});
+
+test("old USB build completing after a controller switch cannot re-enable flash",async()=>{
+  const state=universal();let resume;
+  state.beforeResponse=async url=>{if(url==="/api/studio/build")await new Promise(resolve=>resume=resolve)};
+  const app=page(state);await app.ready();const build=app.run('launchBuild("offline")');
+  await app.ready();app.get("controller").value="ble-esp32";await app.get("controller").fire("change");
+  resume();await build;
+  assert.equal(app.get("flash").disabled,true);assert.equal(app.run("currentBuild"),null);
+  assert.match(app.get("job-state").textContent,/控制器已切换/);
+});
+
+test("controller switch during project save cancels the upload before posting to a board",async()=>{
+  let resume;const state={jobs:[],details:{},beforeResponse:async(url,options)=>{
+    if(options.method==="PUT")await new Promise(resolve=>resume=resolve);
+  }};
+  const app=page(state,{player:true});await app.ready();preparePlayer(app);
+  const upload=app.get("upload-recording").fire();await app.ready();
+  app.get("controller").value="ble-esp32";await app.get("controller").fire("change");
+  resume();await upload;
+  assert.ok(!app.requests.some(request=>request.url==="/api/studio/player/upload"));
+  assert.match(app.get("message").textContent,/控制器或维护确认已改变/);
+});
+
+test("MAC autofill uses only the most recent matching controller; untagged history is USB only",async()=>{
+  const jobs=[{...flash(flashID),board_mac:"00:00:00:00:00:01",created:10},
+    {...flash(olderID),controller:"ble-esp32",board_mac:"00:00:00:00:00:02",created:20},
+    {...flash(taskID),manifest:{controller:"ble-esp32"},board_mac:"00:00:00:00:00:03",created:30}];
+  const usb=page({jobs,details:{}},{player:true});await usb.ready();
+  assert.equal(usb.get("player-mac").value,"00:00:00:00:00:01");
+  const ble=page({jobs,details:{}},{player:true,controller:"ble-esp32"});await ble.ready();
+  assert.equal(ble.get("player-mac").value,"00:00:00:00:00:03");
+  const unknown=page({jobs:[jobs[0]],details:{}},{player:true,controller:"ble-esp32"});await unknown.ready();
+  assert.equal(unknown.get("player-mac").value,"");
+});
+
+test("MAC lookup started before controller change cannot repopulate the cleared MAC",async()=>{
+  let resume;const app=page({jobs:[],details:{}},{player:true});await app.ready();preparePlayer(app);
+  const original=app.run("controllerRevision");
+  const pending=new Promise(resolve=>resume=resolve).then(()=>app.run(`fillPlayerMac(${JSON.stringify([flash(flashID)])},${original})`));
+  app.get("controller").value="ble-esp32";await app.get("controller").fire("change");
+  app.get("controller").value="usb-s3";await app.get("controller").fire("change");
+  resume();await pending;assert.equal(app.get("player-mac").value,"");
+});
+
+test("recording matches actual control transport and old status without a field remains USB",async()=>{
+  const state={jobs:[],details:{},status:{screen:true,device:true,pointer_mode:"absolute",aspect:754/1080,macro:{}}};
+  const app=page(state);await app.ready();app.get("width").value="754";app.get("height").value="1080";
+  assert.equal(app.run("canRecord()"),true);assert.match(app.get("connection").textContent,/USB/);
+  app.get("controller").value="ble-esp32";await app.get("controller").fire("change");
+  assert.equal(app.run("canRecord()"),false);assert.equal(app.get("record").disabled,true);
+  await app.run("pollStatus()");assert.match(app.get("connection").textContent,/不匹配/);
+  const before=app.requests.length;await app.get("play").fire();assert.equal(app.requests.length,before);
+  state.status.control_transport="ble";await app.run("pollStatus()");
+  assert.equal(app.run("canRecord()"),true);assert.equal(app.get("record").disabled,false);
+  assert.match(app.get("connection").textContent,/BLE 蓝牙/);
+  app.get("controller").value="usb-s3";await app.get("controller").fire("change");
+  assert.equal(app.run("canRecord()"),false);
+});
+
+test("BLE arm clears maintenance confirmation before waiting for history refresh",async()=>{
+  const job={id:taskID,kind:"player-control",controller:"ble-esp32",command:"arm",status:"succeeded",stage:"完成"};
+  const state={jobs:[],details:{[taskID]:job}};
+  const app=page(state,{player:true,controller:"ble-esp32"});await app.ready();preparePlayer(app);
+  let resume;state.beforeResponse=async url=>{if(url==="/api/studio/jobs")await new Promise(resolve=>resume=resolve)};
+  const pending=app.run(`activeJob='${taskID}';pollJob()`);await app.ready();
+  assert.equal(app.get("player-detached").checked,false);
+  const before=app.requests.length;await app.get("upload-recording").fire();
+  assert.equal(app.requests.length,before);assert.match(app.get("message").textContent,/持久维护/);
+  resume();await pending;
+});

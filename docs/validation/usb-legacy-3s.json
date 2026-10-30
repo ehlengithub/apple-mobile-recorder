@@ -1,0 +1,8 @@
+{
+  "source_commit": "f898c43677a700e7d2d7742c69f94eeb525a2fbb",
+  "scope": "legacy USB fixed six-step firmware; not integrated player acceptance",
+  "real_page_acceptance": true,
+  "completed_rounds": 10,
+  "mean_cycle_s": 7.588,
+  "user_report": "已重新插拔，运行正常"
+}

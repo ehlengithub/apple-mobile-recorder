@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import Field
 
+from .controllers import PROFILES, Controller
 from .studio import DeviceProfile, Jobs, Project, Store, StrictModel, capture, check_id, ports, tools_status
 
 
@@ -33,12 +34,14 @@ class BuildRequest(StrictModel):
     mode: str = Field(default="offline", pattern=r"^(offline|desktop)$")
     project_id: str | None = None
     network: Network | None = None
+    controller: Controller = "usb-s3"
 
 
 class FlashRequest(StrictModel):
     build_id: str
     port: str
     initialize: bool = False
+    controller: Controller | None = None
 
 
 class RestoreRequest(StrictModel):
@@ -80,6 +83,7 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
             pass
         return {
             "product": "AppleMobileRecorder",
+            "controllers": [{"id": key, **value} for key, value in PROFILES.items()],
             "data_fingerprint": hashlib.sha256(str(data_dir.resolve()).encode()).hexdigest(),
             "airplay_name": os.environ.get("AIRPLAY_NAME", "Apple Recorder"),
             "lan_host": lan_host,
@@ -150,7 +154,11 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
         project = get_project(request.project_id) if request.project_id else None
         try:
             return jobs.start(
-                "build", project, mode=request.mode, network=request.network.model_dump() if request.network else None
+                "build",
+                project,
+                mode=request.mode,
+                network=request.network.model_dump() if request.network else None,
+                controller=request.controller,
             )
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
@@ -169,8 +177,19 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
         # Deliberately omit logs, source paths and network configuration.
         result = []
         fields = (
-            "kind", "status", "stage", "created", "updated", "mode", "port", "board_mac", "build_id", "flash_id",
-            "command", "project_id",
+            "kind",
+            "status",
+            "stage",
+            "created",
+            "updated",
+            "mode",
+            "port",
+            "board_mac",
+            "build_id",
+            "flash_id",
+            "command",
+            "project_id",
+            "controller",
         )
         for path in store.jobs.glob("*/job.json"):
             try:
@@ -187,8 +206,7 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
                 item["backup_ready"] = job.get("kind") == "flash" and job.get("backup_ready") is True
                 backup = path.parent / "backup"
                 item["backup_available"] = item["backup_ready"] and all(
-                    (backup / name).is_file()
-                    for name in ("restore.json", "application.bin", "boot-and-partitions.bin")
+                    (backup / name).is_file() for name in ("restore.json", "application.bin", "boot-and-partitions.bin")
                 )
                 # Persisted 'running' alone is not proof that a worker survived a restart.
                 item["running_here"] = (
@@ -196,6 +214,7 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
                 )
                 manifest = job.get("manifest")
                 if isinstance(manifest, dict):
+                    item["controller"] = manifest.get("controller", item.get("controller", "usb-s3"))
                     item["mode"] = manifest.get("mode", item.get("mode"))
                     item["recording_protocol"] = manifest.get("recording_protocol")
                 recording = job.get("recording")

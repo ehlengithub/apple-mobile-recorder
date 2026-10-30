@@ -16,6 +16,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from .controllers import PROFILES
 from .studio import Jobs, Project, Store, ports, tools_status
 
 
@@ -33,10 +34,12 @@ def main(argv=None):
     serve.add_argument("--without-receiver", action="store_true")
     build = commands.add_parser("build")
     build.add_argument("project", type=Path)
+    build.add_argument("--controller", choices=PROFILES, default="usb-s3")
     flash = commands.add_parser("flash")
     flash.add_argument("build_id")
     flash.add_argument("--port", required=True)
     flash.add_argument("--initialize", action="store_true")
+    flash.add_argument("--controller", choices=PROFILES)
     restore = commands.add_parser("restore")
     restore.add_argument("flash_id")
     restore.add_argument("--port", required=True)
@@ -46,13 +49,17 @@ def main(argv=None):
     transfer.add_argument("project", type=Path)
     transfer.add_argument("--port", required=True)
     transfer.add_argument("--mac", required=True)
-    transfer.add_argument("--hid-disconnected", action="store_true", required=True)
+    transfer.add_argument("--controller", choices=PROFILES, default="usb-s3")
+    transfer.add_argument("--hid-disconnected", action="store_true")
+    transfer.add_argument("--maintenance-confirmed", action="store_true")
     control = commands.add_parser("player", help="启用离线执行或切回电脑录制")
     control.add_argument("action", choices=("arm", "desktop", "stop"))
     control.add_argument("--project", type=Path)
     control.add_argument("--port", required=True)
     control.add_argument("--mac", required=True)
-    control.add_argument("--hid-disconnected", action="store_true", required=True)
+    control.add_argument("--controller", choices=PROFILES, default="usb-s3")
+    control.add_argument("--hid-disconnected", action="store_true")
+    control.add_argument("--maintenance-confirmed", action="store_true")
     export = commands.add_parser("export-recording", help="导出独立AMR2录制数据")
     export.add_argument("project", type=Path)
     export.add_argument("--output", type=Path, required=True)
@@ -103,23 +110,41 @@ def main(argv=None):
             )
             return 0
         if args.command in ("build", "flash", "restore", "upload", "player"):
+            if args.command in ("upload", "player"):
+                if args.controller == "ble-esp32" and not args.maintenance_confirmed:
+                    raise ValueError("蓝牙板须先长按BOOT进入维护模式，并添加--maintenance-confirmed")
+                if args.controller == "usb-s3" and not args.hid_disconnected:
+                    raise ValueError("USB板须先断开HID，并添加--hid-disconnected")
             manager = Jobs(store)
             if args.command == "build":
                 project = Project.model_validate_json(args.project.read_text())
                 store.save(project)
-                job = manager.start("build", project, mode="offline")
+                job = manager.start("build", project, mode="offline", controller=args.controller)
             elif args.command == "upload":
                 project = Project.model_validate_json(args.project.read_text())
-                job = manager.start("upload", project, port=args.port, expected_mac=args.mac)
+                job = manager.start(
+                    "upload", project, port=args.port, expected_mac=args.mac, controller=args.controller
+                )
             elif args.command == "player":
                 project = Project.model_validate_json(args.project.read_text()) if args.project else None
                 if args.action == "arm" and project is None:
                     raise ValueError("启用前必须通过--project指定对应录制")
                 job = manager.start(
-                    "player-control", project, port=args.port, expected_mac=args.mac, command=args.action
+                    "player-control",
+                    project,
+                    port=args.port,
+                    expected_mac=args.mac,
+                    command=args.action,
+                    controller=args.controller,
                 )
             elif args.command == "flash":
-                job = manager.start("flash", build_id=args.build_id, port=args.port, initialize=args.initialize)
+                job = manager.start(
+                    "flash",
+                    build_id=args.build_id,
+                    port=args.port,
+                    initialize=args.initialize,
+                    controller=args.controller,
+                )
             else:
                 job = manager.start("restore", flash_id=args.flash_id, port=args.port)
             last_stage = None

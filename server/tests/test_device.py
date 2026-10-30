@@ -114,3 +114,23 @@ def test_cancelled_command_closes_link_before_the_next_command():
             await asyncio.wait_for(queued, .5)
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("marker,expected", [("absolute ble", "ble"), ("absolute usb", "usb"), ("absolute", "usb")])
+def test_greeting_records_input_transport_and_old_firmware_defaults_usb(marker, expected):
+    class Writer:
+        def is_closing(self): return False
+        def close(self): pass
+        def get_extra_info(self, _): return None
+
+    class Reader:
+        async def readline(self): return f"hello power-on 100 {marker}\n".encode()
+
+    async def scenario():
+        device = Device()
+        await device._accept(Reader(), Writer())
+        assert device.absolute and device.transport == expected
+        await device._accept(type("OldReader", (), {"readline": lambda self: asyncio.sleep(0, result=b"hello old 1\n")})(), Writer())
+        assert not device.absolute and device.transport == "usb"
+
+    asyncio.run(scenario())

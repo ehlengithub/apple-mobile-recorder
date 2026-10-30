@@ -13,8 +13,8 @@ from hidagent.player import Player, encode_recording
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.fixture(scope="module")
-def native(tmp_path_factory):
+@pytest.fixture(scope="module", params=["usb-s3", "ble-esp32"])
+def native(tmp_path_factory, request):
     compiler = shutil.which("c++")
     if not compiler:
         pytest.skip("C++ compiler needed for firmware integration")
@@ -23,6 +23,7 @@ def native(tmp_path_factory):
         [
             compiler,
             "-std=c++17",
+            "-DAMR_HOST_BLE=" + str(int(request.param == "ble-esp32")),
             "-I" + str(ROOT / "hardware/player"),
             str(ROOT / "tests/player_wire_host.cpp"),
             "-o",
@@ -30,7 +31,7 @@ def native(tmp_path_factory):
         ],
         check=True,
     )
-    return executable
+    return executable, request.param
 
 
 class Pipe:
@@ -59,14 +60,22 @@ class Pipe:
 
 @pytest.mark.parametrize("count", [1, 256])
 def test_real_python_to_cpp_upload_and_mode_switch(native, count):
-    pipe = Pipe(native)
-    player = Player("native-no-hardware", MAC, serial_factory=lambda **_: pipe)
+    executable, controller = native
+    pipe = Pipe(executable)
+    player = Player("native-no-hardware", MAC, serial_factory=lambda **_: pipe, controller=controller)
     try:
         first = encode_recording(plan(steps=plan().steps * count))
         meta = player.upload(first)
         assert player.read_recording() == first
         assert player.control("arm", meta["crc"])["armed"]
+        if controller == "ble-esp32":
+            with pytest.raises(ValueError, match="维护"):
+                player.upload(first)
+            # Native simulation of the board's physical BOOT maintenance event.
+            player.request("maintenance")
         assert player.control("desktop")["mode"] == "desktop"
+        if controller == "ble-esp32":
+            player.request("maintenance")
         second = encode_recording(plan(steps=plan().steps * count, loops=3, startup_ms=5000))
         assert second != first
         player.upload(second)

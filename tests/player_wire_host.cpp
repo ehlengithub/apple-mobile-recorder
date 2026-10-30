@@ -2,16 +2,24 @@
 #include "player_format.h"
 #include "player_protocol.h"
 #include "player_store.h"
+#include "player_control.h"
 #include <cstring>
 #include <iomanip>
 #include <iostream>
 #include <string>
 #include <vector>
+#ifndef AMR_HOST_BLE
+#define AMR_HOST_BLE 0
+#endif
 struct Backend {
   bool ready = true, enabled = false, mode = false;
+  bool maintenanceFlag = true;
+  amr::AccessGate gate{AMR_HOST_BLE != 0, true, 0};
   int slot = -1;
   std::vector<uint8_t> slots[2];
-  bool blocked() { return false; }
+  bool blocked() { return gate.blocked(false, 0); }
+  bool maintenance() { return maintenanceFlag; }
+  bool writeMaintenance(bool value) { maintenanceFlag = value; return true; }
   int active() { return slot; }
   bool armed() { return enabled; }
   bool desktop() { return mode; }
@@ -26,6 +34,8 @@ struct Backend {
 };
 int main() {
   Backend backend; amr::Store<Backend> store(backend); amr::Upload upload; amr::Line line;
+  amr::Maintenance<Backend> maintenance(backend, backend.gate);
+  if (AMR_HOST_BLE) maintenance.load(store);
   uint32_t now = 0;
   auto fail=[](const char *e){std::cout<<"AMR2 {\"ok\":false,\"error\":\""<<e<<"\"}"<<std::endl;};
   char c;
@@ -36,8 +46,15 @@ int main() {
     amr::Request r;
     if (auto e=amr::parse(line.text,r)) {upload.abort();fail(e);continue;}
     ++now;
+    if (AMR_HOST_BLE && (r.op == amr::Op::Begin || r.op == amr::Op::Data || r.op == amr::Op::Commit ||
+        r.op == amr::Op::Arm || r.op == amr::Op::Desktop) && backend.blocked()) {
+      upload.abort();fail("maintenance-required");continue;
+    }
     if (r.op==amr::Op::Info) {
       std::cout<<"AMR2 {\"ok\":true,\"protocol\":2,\"mac\":\"02:00:00:00:00:01\",\"mounted\":false,\"size\":"<<store.size
+      <<",\"transport\":\""<<(AMR_HOST_BLE?"ble":"usb")<<"\",\"chip\":\""<<(AMR_HOST_BLE?"esp32":"esp32s3")
+      <<"\",\"connected\":false,\"maintenance\":"<<(backend.gate.maintenance?"true":"false")
+      <<",\"maintenance_saved\":"<<(maintenance.durable?"true":"false")
       <<",\"armed\":"<<(store.armed?"true":"false")<<",\"mode\":\""<<(store.desktop?"desktop":"offline")<<"\",\"crc\":\"";
       if(store.size) std::cout<<std::hex<<std::setw(8)<<std::setfill('0')<<amr::u32(store.bytes+store.size-4)<<std::dec;
       std::cout<<"\"}"<<std::endl;
@@ -58,9 +75,14 @@ int main() {
       std::cout<<"AMR2 {\"ok\":true,\"size\":"<<store.size<<",\"crc\":\""<<std::hex<<std::setw(8)<<std::setfill('0')
       <<amr::u32(store.bytes+store.size-4)<<std::dec<<"\",\"armed\":false}"<<std::endl;
     } else if(r.op==amr::Op::Arm){
-      if(auto e=store.arm()){fail(e);continue;}std::cout<<"AMR2 {\"ok\":true,\"armed\":true}"<<std::endl;
+      if(auto e=AMR_HOST_BLE?maintenance.enable(store,false):store.arm()){fail(e);continue;}
+      std::cout<<"AMR2 {\"ok\":true,\"armed\":true}"<<std::endl;
     } else if(r.op==amr::Op::Desktop){
-      if(auto e=store.setDesktop()){fail(e);continue;}std::cout<<"AMR2 {\"ok\":true,\"mode\":\"desktop\"}"<<std::endl;
+      if(auto e=AMR_HOST_BLE?maintenance.enable(store,true):store.setDesktop()){fail(e);continue;}
+      std::cout<<"AMR2 {\"ok\":true,\"mode\":\"desktop\"}"<<std::endl;
+    } else if(r.op==amr::Op::Maintenance){
+      upload.abort();if(auto e=maintenance.enter(store)){fail(e);continue;}
+      std::cout<<"AMR2 {\"ok\":true,\"maintenance\":true}"<<std::endl;
     } else {upload.abort();std::cout<<"AMR2 {\"ok\":true}"<<std::endl;}
   }
 }

@@ -1,5 +1,13 @@
 // Based on ESP32 iPhone Agent by Henry Yuan (MIT). All sends are checked.
 #pragma once
+#ifndef AMR_BLE
+#define AMR_BLE 0
+#endif
+#if AMR_BLE
+#include "player_ble.h"
+#else
+#include <atomic>
+#include "USB.h"
 #include "USBHIDMouse.h"
 #include "USBHIDKeyboard.h"
 #include "tusb.h"
@@ -44,3 +52,44 @@ class CheckedKeyboard : public USBHIDKeyboard {
     return false;
   }
 };
+
+class PlayerHid {
+  CheckedAbsoluteMouse pointer;
+  CheckedKeyboard keyboard;
+  std::atomic<uint32_t> generation{0};
+ public:
+  static constexpr bool ble = false;
+  const char *transport() const { return "usb"; }
+  const char *chip() const { return "esp32s3"; }
+  bool mounted() const { return tud_mounted(); }
+  bool suspended() const { return tud_suspended(); }
+  bool encrypted() const { return false; }
+  bool subscribed() const { return false; }
+  uint32_t epoch() const { return generation.load(); }
+  uint32_t sessionEpoch() const { return epoch(); }
+  bool linkReady() const { return mounted(); }
+  bool ready() { return pointer.ready() && keyboard.ready(); }
+  bool begin(bool) {
+    static PlayerHid *instance = this;
+    USB.onEvent([](void *, esp_event_base_t, int32_t id, void *) {
+      if (id == ARDUINO_USB_STARTED_EVENT || id == ARDUINO_USB_STOPPED_EVENT)
+        ++instance->generation;
+    });
+    pointer.begin(); keyboard.begin();
+    USB.productName("Apple Mobile Recorder"); USB.begin(); return true;
+  }
+  bool enable() { return true; }
+  void disable() {}
+  bool place(uint16_t x, uint16_t y) { return pointer.place(x, y); }
+  bool down() { return pointer.down(); }
+  bool up() { return pointer.up(); }
+  bool scroll(int8_t wheel, int8_t pan) { return pointer.scroll(wheel, pan); }
+  bool releaseAll() {
+    const bool mouseOK = pointer.up();
+    const bool keyboardOK = keyboard.up();
+    return mouseOK && keyboardOK;
+  }
+  bool keyboardReport(const KeyReport &value) { return keyboard.report(value); }
+  bool keyboardUp() { return keyboard.up(); }
+};
+#endif
