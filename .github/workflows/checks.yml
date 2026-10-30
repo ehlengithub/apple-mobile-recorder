@@ -12,7 +12,10 @@ jobs:
           python-version: '3.12'
       - run: uv sync --project server --all-extras --frozen
       - run: HIDAGENT_DATA=/tmp/apple-recorder-test server/.venv/bin/python -m pytest server/tests -q
-      - run: server/.venv/bin/ruff check server/hidagent/studio.py server/hidagent/studio_api.py server/hidagent/workbench.py server/hidagent/app.py server/tests/test_studio.py server/tests/test_studio_api.py
+      - run: server/.venv/bin/ruff check server/hidagent/studio.py server/hidagent/studio_api.py server/hidagent/workbench.py server/hidagent/app.py server/hidagent/player.py server/hidagent/player_api.py server/tests/test_studio.py server/tests/test_studio_api.py server/tests/test_player.py server/tests/test_player_api.py server/tests/test_player_native.py
       - run: node --check server/hidagent/static/studio.js
+      - run: node --check server/hidagent/static/player.js
+      - run: node --test server/tests/studio_ui.test.cjs
       - run: c++ -std=c++17 -Wall -Wextra -Werror tests/replay_engine_test.cpp -o /tmp/replay-test && /tmp/replay-test
+      - run: c++ -std=c++17 -Wall -Wextra -Werror -pedantic -fsanitize=address,undefined -fno-omit-frame-pointer -Ihardware/player tools/test_player.cpp -o /tmp/player-test && /tmp/player-test
       - run: bash -n scripts/setup-macos.sh 启动工作台.command 准备环境.command 启动测试页.command

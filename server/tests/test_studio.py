@@ -205,3 +205,88 @@ def test_process_lock_prevents_parallel_cli_and_web_jobs(tmp_path):
         a._release_process_lock()
     b._process_lock()
     b._release_process_lock()
+
+
+def test_restore_rejects_same_board_after_external_repartition(tmp_path, monkeypatch):
+    manager, job, build_id, calls = prepare_flash(tmp_path, monkeypatch)
+    manager._flash(job, build_id, "/dev/test-board")
+    old_run = manager._run
+
+    def changed_layout(state, argv, timeout=600):
+        result = old_run(state, argv, timeout)
+        if "read-flash" in argv:
+            path = Path(argv[-1])
+            data = bytearray(path.read_bytes())
+            # Same MAC, but data now occupies the old application address.
+            struct.pack_into("<HBBII16sI", data, 0x8000, 0x50AA, 1, 2, 0x10000, 8192, b"userdata", 0)
+            path.write_bytes(data)
+        return result
+
+    monkeypatch.setattr(manager, "_run", changed_layout)
+    calls.clear()
+    with pytest.raises(ValueError, match="分区"):
+        manager._restore({"id": "c" * 32}, job["id"], "/dev/test-board")
+    assert any("read-flash" in call for call in calls)
+    assert not any("write-flash" in call or "hard-reset" in call for call in calls)
+
+
+def test_restore_old_backup_without_installed_hash_checks_original_table(tmp_path, monkeypatch):
+    manager, job, build_id, calls = prepare_flash(tmp_path, monkeypatch)
+    manager._flash(job, build_id, "/dev/test-board")
+    path = manager.store.jobs / job["id"] / "backup/restore.json"
+    info = json.loads(path.read_text())
+    info.pop("installed_partition_sha256")
+    studio.atomic_json(path, info)
+    calls.clear()
+    manager._restore({"id": "c" * 32}, job["id"], "/dev/test-board")
+    assert ["read-flash" in c for c in calls] == [False, True, False]
+
+
+def test_restore_refuses_truncated_current_partition_read(tmp_path, monkeypatch):
+    manager, job, build_id, calls = prepare_flash(tmp_path, monkeypatch)
+    manager._flash(job, build_id, "/dev/test-board")
+    old_run = manager._run
+
+    def truncated(state, argv, timeout=600):
+        result = old_run(state, argv, timeout)
+        if "read-flash" in argv:
+            Path(argv[-1]).write_bytes(b"\xff" * 100)
+        return result
+
+    monkeypatch.setattr(manager, "_run", truncated)
+    calls.clear()
+    with pytest.raises(ValueError, match="不完整"):
+        manager._restore({"id": "c" * 32}, job["id"], "/dev/test-board")
+    assert not any("write-flash" in c for c in calls)
+
+
+def test_universal_build_does_not_embed_project_or_invalidate_with_plan_edits(tmp_path, monkeypatch):
+    manager = Jobs(Store(tmp_path))
+    monkeypatch.setattr(studio, "tools_status", lambda: {"arduino": "mock-compiler"})
+
+    def compiler(job, argv, timeout):
+        out = Path(argv[argv.index("--output-dir") + 1])
+        out.mkdir()
+        (out / "UniversalPlayer.ino.bin").write_bytes(b"mock-executable")
+        return "compiled"
+
+    monkeypatch.setattr(manager, "_run", compiler)
+    project = plan()
+    job = {"id": "d" * 32}
+    manager._save(job)
+    manager._build(job, project)
+    folder = manager.store.jobs / job["id"]
+    assert job["manifest"]["recording_protocol"] == 2
+    assert job["manifest"]["project_id"] is None
+    assert not (folder / "project.json").exists()
+    assert not (folder / "UniversalPlayer/macro_data.h").exists()
+    assert not any(project.id in p.read_text() for p in (folder / "UniversalPlayer").iterdir() if p.is_file())
+    assert (folder / "UniversalPlayer/replay_engine.h").read_bytes() == (
+        studio.ROOT / "hardware/offline_replay/replay_engine.h"
+    ).read_bytes()
+
+
+def test_player_and_legacy_use_identical_replay_engine():
+    assert (studio.ROOT / "hardware/player/replay_engine.h").read_bytes() == (
+        studio.ROOT / "hardware/offline_replay/replay_engine.h"
+    ).read_bytes()

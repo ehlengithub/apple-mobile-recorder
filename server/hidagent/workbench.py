@@ -42,6 +42,20 @@ def main(argv=None):
     restore.add_argument("--port", required=True)
     import_project = commands.add_parser("import")
     import_project.add_argument("project", type=Path)
+    transfer = commands.add_parser("upload", help="只上传录制数据，不重新烧录固件")
+    transfer.add_argument("project", type=Path)
+    transfer.add_argument("--port", required=True)
+    transfer.add_argument("--mac", required=True)
+    transfer.add_argument("--hid-disconnected", action="store_true", required=True)
+    control = commands.add_parser("player", help="启用离线执行或切回电脑录制")
+    control.add_argument("action", choices=("arm", "desktop", "stop"))
+    control.add_argument("--project", type=Path)
+    control.add_argument("--port", required=True)
+    control.add_argument("--mac", required=True)
+    control.add_argument("--hid-disconnected", action="store_true", required=True)
+    export = commands.add_parser("export-recording", help="导出独立AMR2录制数据")
+    export.add_argument("project", type=Path)
+    export.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     os.environ["HIDAGENT_DATA"] = str(args.data.resolve())
     os.environ.setdefault("DEVICE_PORT", "7400")
@@ -70,6 +84,13 @@ def main(argv=None):
             )
             return 0
         store = Store(args.data / "studio")
+        if args.command == "export-recording":
+            from .player import encode_recording
+
+            project = Project.model_validate_json(args.project.read_text())
+            args.output.write_bytes(encode_recording(project))
+            print(f"已导出{len(project.steps)}步录制；未操作硬件")
+            return 0
         if args.command == "import":
             project = Project.model_validate_json(args.project.read_text())
             project.id = uuid.uuid4().hex
@@ -81,12 +102,22 @@ def main(argv=None):
                 )
             )
             return 0
-        if args.command in ("build", "flash", "restore"):
+        if args.command in ("build", "flash", "restore", "upload", "player"):
             manager = Jobs(store)
             if args.command == "build":
                 project = Project.model_validate_json(args.project.read_text())
                 store.save(project)
                 job = manager.start("build", project, mode="offline")
+            elif args.command == "upload":
+                project = Project.model_validate_json(args.project.read_text())
+                job = manager.start("upload", project, port=args.port, expected_mac=args.mac)
+            elif args.command == "player":
+                project = Project.model_validate_json(args.project.read_text()) if args.project else None
+                if args.action == "arm" and project is None:
+                    raise ValueError("启用前必须通过--project指定对应录制")
+                job = manager.start(
+                    "player-control", project, port=args.port, expected_mac=args.mac, command=args.action
+                )
             elif args.command == "flash":
                 job = manager.start("flash", build_id=args.build_id, port=args.port, initialize=args.initialize)
             else:

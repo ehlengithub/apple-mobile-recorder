@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse
 from PIL import Image
 from pydantic import Field
 
-from .studio import DeviceProfile, Jobs, Project, Store, StrictModel, capture, ports, tools_status
+from .studio import DeviceProfile, Jobs, Project, Store, StrictModel, capture, check_id, ports, tools_status
 
 
 class CaptureRequest(StrictModel):
@@ -54,6 +54,10 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
         check_manual()
         if macro.recording or macro.playing:
             raise HTTPException(409, "请先结束录制或停止电脑回放")
+
+    from .player_api import register as register_player
+
+    register_player(app, store, jobs, idle)
 
     def get_project(identity):
         try:
@@ -124,7 +128,7 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
         return store.save(project).model_dump()
 
     @app.post("/api/studio/projects/{identity}/play")
-    def project_play(identity: str):
+    async def project_play(identity: str):
         idle()
         project = get_project(identity)
         if not device.connected or not screen.live or not getattr(device, "absolute", False):
@@ -144,8 +148,6 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
     def build(request: BuildRequest):
         idle()
         project = get_project(request.project_id) if request.project_id else None
-        if request.mode == "offline" and project is None:
-            raise HTTPException(422, "请先保存一个录制项目")
         try:
             return jobs.start(
                 "build", project, mode=request.mode, network=request.network.model_dump() if request.network else None
@@ -160,6 +162,53 @@ def register(app, data_dir, device, screen, phone, macro, check_manual):
             return jobs.start("flash", **request.model_dump())
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(409, str(exc)) from exc
+
+    @app.get("/api/studio/jobs")
+    def job_history():
+        # Read persisted metadata, so a page or server restart cannot hide backups.
+        # Deliberately omit logs, source paths and network configuration.
+        result = []
+        fields = (
+            "kind", "status", "stage", "created", "updated", "mode", "port", "board_mac", "build_id", "flash_id",
+            "command", "project_id",
+        )
+        for path in store.jobs.glob("*/job.json"):
+            try:
+                identity = check_id(path.parent.name)
+                job = json.loads(path.read_text())
+                if not isinstance(job, dict) or job.get("id") != identity:
+                    continue
+                if job.get("kind") not in ("build", "flash", "restore", "upload", "player-control"):
+                    continue
+                if not isinstance(job.get("created", 0), (int, float)):
+                    continue
+                item = {key: job[key] for key in fields if key in job}
+                item["id"] = identity
+                item["backup_ready"] = job.get("kind") == "flash" and job.get("backup_ready") is True
+                backup = path.parent / "backup"
+                item["backup_available"] = item["backup_ready"] and all(
+                    (backup / name).is_file()
+                    for name in ("restore.json", "application.bin", "boot-and-partitions.bin")
+                )
+                # Persisted 'running' alone is not proof that a worker survived a restart.
+                item["running_here"] = (
+                    identity in jobs.states and jobs.lock.locked() and job.get("status") in ("queued", "running")
+                )
+                manifest = job.get("manifest")
+                if isinstance(manifest, dict):
+                    item["mode"] = manifest.get("mode", item.get("mode"))
+                    item["recording_protocol"] = manifest.get("recording_protocol")
+                recording = job.get("recording")
+                if isinstance(recording, dict):
+                    item["recording"] = {
+                        key: recording[key]
+                        for key in ("project_id", "name", "size", "steps", "cycle_ms", "loops", "crc")
+                        if key in recording and isinstance(recording[key], (str, int, float))
+                    }
+                result.append(item)
+            except (ValueError, OSError):
+                continue
+        return sorted(result, key=lambda item: item.get("created", 0), reverse=True)
 
     @app.get("/api/studio/jobs/{identity}")
     def job_get(identity: str):

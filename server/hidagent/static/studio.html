@@ -3,9 +3,9 @@
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Apple Mobile Recorder</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/static/studio.css"></head>
 <body>
 <header class="top"><div><span class="eyebrow">ESP32-S3 · USB 绝对定位</span><h1>Apple Mobile Recorder</h1><p>电脑上录制，插上设备就执行。</p></div><div class="top-actions"><span id="connection" class="badge">检查连接…</span><button id="stop" class="danger">停止电脑回放 · Esc</button></div></header>
-<nav class="flow"><span>01 选择设备</span><span>02 录制点击</span><span>03 调整节奏</span><span>04 生成与烧录</span></nav>
+<nav class="flow"><span>01 选择设备</span><span>02 录制点击</span><span>03 调整节奏</span><span>04 上传与离线执行</span></nav>
 <main>
-<section class="preview card"><div class="section-head"><h2>实时画面</h2><button id="fullscreen">放大画面</button></div><div id="stage"><img id="screen" alt="iPhone / iPad 实时投屏"><div id="empty">先切换到录制模式固件<br>在目标设备的「屏幕镜像」中选择 Apple Recorder</div></div><p class="hint">在画面上点击完成操作。投屏和 USB/HID 必须连接同一台设备。</p><div class="controls"><button id="record" class="primary">开始录制</button><span id="record-state">尚未录制</span></div></section>
+<section class="preview card"><div class="section-head"><h2>实时画面</h2><button id="fullscreen">放大画面</button></div><div id="stage"><img id="screen" alt="iPhone / iPad 实时投屏"><div id="empty">先切换到电脑录制模式<br>在目标设备的「屏幕镜像」中选择 Apple Recorder</div></div><p class="hint">在画面上点击完成操作。投屏和 USB/HID 必须连接同一台设备。</p><div class="controls"><button id="record" class="primary">开始录制</button><span id="record-state">尚未录制</span></div></section>
 <aside>
 <section class="card"><div class="section-head"><h2>设备与录制</h2><button id="refresh">刷新</button></div>
 <label>已保存的录制<select id="projects"><option value="">新建录制</option></select></label>
@@ -17,14 +17,21 @@
 <p class="hint">间隔包含 350ms 定位稳定、60ms 按压和释放等待，最短 0.5 秒。首次建议只试跑 1 轮。</p>
 <div class="controls"><button id="save" class="primary">保存参数</button><button id="play">电脑试跑 1 轮</button><button id="export">导出项目</button></div></section>
 <section class="card"><div class="section-head"><h2>生成与烧录</h2><span id="tools" class="badge">检查环境…</span></div>
-<div class="controls"><button id="build" class="primary">生成离线固件</button><a id="download" hidden>下载固件</a></div>
+<div class="controls"><button id="build" class="primary">生成通用播放器（首次安装）</button><a id="download" hidden>下载固件</a></div>
+<p class="hint">播放器首次安装后，新增或修改录制只需上传数据。上传校验后保持待机，另点“启用”再接入 USB/HID 执行。</p>
 <p id="firmware-summary" class="hint" hidden></p>
 <label>ESP32 的 COM 烧录口<select id="port"><option value="">请选择 COM 口</option></select></label>
 <label class="check"><input type="checkbox" id="initialize">这是未初始化的空板（仅首次使用）</label>
-<div class="controls"><button id="flash" disabled>备份后烧录到 ESP32</button><button id="restore" hidden>恢复烧录前版本</button></div>
+<div class="controls"><button id="flash" disabled>备份后烧录到 ESP32</button></div>
 <p id="job-state" class="hint">生成固件后再烧录。烧录会停止板子当前执行，先保存好操作页面。</p><pre id="job-log" hidden></pre>
-<details><summary>需要重新录制？生成录制模式固件</summary><p class="hint">电脑录制需要板子和电脑在同一局域网。离线执行不需要 Wi-Fi，也不需要配套 App。</p><div class="form-grid"><label>Wi-Fi 名称<input id="ssid" autocomplete="off"></label><label>Wi-Fi 密码<input id="password" type="password" autocomplete="new-password"></label><label>电脑局域网 IP<input id="host" placeholder="如 192.168.1.20"></label><label>控制端口<input id="device-port" type="number" value="7400"></label></div><button id="build-desktop">生成录制模式固件</button><p class="hint">该固件含连接配置，只保存在本机；不要上传到公开仓库。</p></details>
+<details><summary>播放器的电脑录制连接配置（首次安装）</summary><p class="hint">电脑录制需要板子和电脑在同一局域网。离线执行不需要 Wi-Fi，也不需要配套 App。</p><div class="form-grid"><label>Wi-Fi 名称<input id="ssid" autocomplete="off"></label><label>Wi-Fi 密码<input id="password" type="password" autocomplete="new-password"></label><label>电脑局域网 IP<input id="host" placeholder="如 192.168.1.20"></label><label>控制端口<input id="device-port" type="number" value="7400"></label></div><button id="build-desktop">生成支持电脑录制的通用播放器</button><p class="hint">该固件含连接配置，只保存在本机；不要上传到公开仓库。</p></details>
 </section>
-<section class="card note"><h2>插上执行，按 BOOT 停止</h2><p>新烧录的离线固件首次保持待机。保持 COM 供电，等 HID 已连接后，拔下 USB/HID 并重新插入，即可解除首次部署锁。之后可以脱离电脑运行。</p><p>离线不会识别页面变化、弹窗或列表到底。网页停止只管电脑回放；离线执行请按板上 <b>BOOT</b> 或拔掉 USB/HID。不要用 EN/RESET 当停止键。</p><a href="/legacy">旧版高级控制页</a></section>
+<section class="card" aria-labelledby="history-title"><div class="section-head"><h2 id="history-title">任务与烧录前备份</h2><button id="refresh-history">刷新任务</button></div>
+<label>历史任务<select id="job-history"><option value="">正在读取任务记录…</option></select></label>
+<p id="history-detail" class="hint">备份保存在本机，刷新页面后仍可选择。恢复时请明确选择原板的 COM 口。</p>
+<div class="controls"><button id="view-job" disabled>查看任务日志</button><button id="restore" disabled>恢复所选任务的烧录前版本</button></div></section>
+<!-- Reserved for the forthcoming recording-data upload flow. -->
+<section id="recording-upload-region" class="card" aria-label="录制数据上传" hidden></section>
+<section class="card note"><h2>上传后启用，接入后执行</h2><p>新播放器默认没有录制。先保持 COM 接电脑、拔下 USB/HID；上传录制并校验后，单独点“启用”，再接入 USB/HID，等待录制设定的倒计时执行。修改录制只需重新上传。</p><p>离线不会识别页面变化、弹窗或列表到底。网页停止只管电脑回放；离线执行请按板上 <b>BOOT</b> 或拔掉 USB/HID。不要用 EN/RESET 当停止键。</p><a href="/legacy">旧版高级控制页</a></section>
 </aside></main><div id="message" role="status" hidden></div><footer>Based on ESP32 iPhone Agent by Henry Yuan · <a href="https://github.com/onehumanbeing/esp32-iphone-agent" target="_blank" rel="noreferrer">原项目 / MIT</a> · iPad14,3 已实测，其他设备需分别验收</footer>
-<script src="/static/studio.js"></script></body></html>
+<script src="/static/studio.js"></script><script src="/static/player.js"></script></body></html>

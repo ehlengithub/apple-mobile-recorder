@@ -323,6 +323,10 @@ class Jobs:
                     self._flash(job, **options)
                 elif kind == "restore":
                     self._restore(job, **options)
+                elif kind == "upload":
+                    self._upload(job, snapshot, **options)
+                elif kind == "player-control":
+                    self._player_control(job, snapshot, **options)
                 else:
                     raise ValueError("未知任务类型")
                 self._save(job, status="succeeded", stage="完成")
@@ -342,7 +346,30 @@ class Jobs:
             raise RuntimeError("未找到 arduino-cli，请先运行 scripts/setup-macos.sh")
         folder = self.store.jobs / job["id"]
         out = folder / "firmware"
-        if mode == "offline":
+        if mode in ("offline", "desktop"):
+            sketch = folder / "UniversalPlayer"
+            shutil.copytree(ROOT / "hardware/player", sketch, ignore=shutil.ignore_patterns("build", "README.md"))
+            (sketch / "player.ino").rename(sketch / "UniversalPlayer.ino")
+            shutil.copy2(ROOT / "hardware/offline_replay/replay_engine.h", sketch / "replay_engine.h")
+            arguments = []
+            if network:
+                if not all(network.get(key) for key in ("ssid", "host")):
+                    raise ValueError("电脑录制需要 Wi-Fi 名称和电脑的局域网地址")
+                secrets = {
+                    "WIFI_SSID": network["ssid"],
+                    "WIFI_PASS": network.get("password", ""),
+                    "SERVER_HOST": network["host"],
+                    "SERVER_PORT": int(network.get("port", 7400)),
+                }
+                self.redactions[job["id"]] = [network.get("password", "")]
+                (sketch / "secrets.h").write_text(
+                    "\n".join(f"#define {k} {json.dumps(v, ensure_ascii=True)}" for k, v in secrets.items()) + "\n"
+                )
+            if mode == "desktop" and not network:
+                raise ValueError("电脑录制播放器需要网络配置")
+            # No project/recording goes into executable firmware. Upload AMR2 data later.
+            project = None
+        elif mode == "legacy-offline":
             sketch = folder / "OfflinePlayer"
             shutil.copytree(
                 ROOT / "hardware/offline_replay", sketch, ignore=shutil.ignore_patterns("build", "README.md")
@@ -351,7 +378,7 @@ class Jobs:
             (sketch / "macro_data.h").write_text(render_header(project, job["id"]))
             atomic_json(folder / "project.json", project.model_dump())
             arguments = []
-        elif mode == "desktop":
+        elif mode == "legacy-desktop":
             if not network or not all(network.get(key) for key in ("ssid", "host")):
                 raise ValueError("录制模式需要 Wi-Fi 名称和电脑的局域网地址")
             sketch = folder / "DesktopBridge"
@@ -389,7 +416,8 @@ class Jobs:
             "loops": project.loops if project else None,
             "startup_ms": project.startup_ms if project else None,
             "deployment_id": job["id"],
-            "contains_network_credentials": mode == "desktop",
+            "contains_network_credentials": bool(network),
+            "recording_protocol": 2 if mode in ("offline", "desktop") else None,
         }
         if project:
             manifest["project_sha256"] = hashlib.sha256(
@@ -437,6 +465,8 @@ class Jobs:
         self._save(job, stage="备份启动区与分区表")
         command("read-flash", "0x0", "0x10000", backup / "boot-and-partitions.bin")
         original = (backup / "boot-and-partitions.bin").read_bytes()
+        if len(original) != 65536:
+            raise ValueError("启动区备份读取不完整，未写入")
         expected = next(out.glob("*.partitions.bin")).read_bytes()
         actual = original[0x8000 : 0x8000 + len(expected)]
         empty = original == b"\xff" * 65536
@@ -453,6 +483,8 @@ class Jobs:
             raise ValueError("固件大小或应用分区不兼容")
         self._save(job, stage="备份应用区（115200串口首次可能需要数分钟）")
         command("read-flash", "0x10000", hex(app_size), backup / "application.bin", timeout=900)
+        if (backup / "application.bin").stat().st_size != app_size:
+            raise ValueError("应用区备份读取不完整，未写入")
         restore = {
             "mac": mac.group(1).lower(),
             "application_offset": 65536,
@@ -460,6 +492,9 @@ class Jobs:
             "application_sha256": hashlib.sha256((backup / "application.bin").read_bytes()).hexdigest(),
             "boot_sha256": hashlib.sha256(original).hexdigest(),
             "initialized_empty_board": empty,
+            "installed_partition_sha256": hashlib.sha256(
+                expected.ljust(4096, b"\xff")[:4096] if empty else original[0x8000:0x9000]
+            ).hexdigest(),
         }
         atomic_json(backup / "restore.json", restore)
         self._save(job, stage="写入并校验固件", board_mac=restore["mac"], backup_ready=True)
@@ -480,7 +515,7 @@ class Jobs:
             raise RuntimeError("未获得写入哈希校验确认，请保留备份检查板卡")
         self._save(
             job,
-            stage="写入成功；离线固件首次保持待机，重插HID后启用",
+            stage="播放器写入成功；请单独上传录制并明确启用",
             flash_hash_verified=True,
             manifest=manifest,
             restore=restore,
@@ -509,6 +544,21 @@ class Jobs:
         mac = re.search(r"MAC:\s*([0-9a-fA-F:]{17})", identity)
         if not mac or mac.group(1).lower() != info["mac"]:
             raise ValueError("板卡MAC与备份不一致，禁止恢复到另一块板子")
+        # Same board is not proof of the same layout. Never restore across a
+        # partition change made by another tool, even if all backup hashes match.
+        current = self.store.jobs / job["id"] / "current-boot.bin"
+        self._run(job, [*base, "--after", "no-reset", "read-flash", "0x0", "0x10000", str(current)])
+        current_bytes = current.read_bytes()
+        if len(current_bytes) != 65536:
+            raise ValueError("当前启动区读取不完整，禁止恢复")
+        old_boot = boot.read_bytes()
+        expected_hash = info.get("installed_partition_sha256")
+        if not expected_hash and not info["initialized_empty_board"]:
+            expected_hash = hashlib.sha256(old_boot[0x8000:0x9000]).hexdigest()
+        if not expected_hash or hashlib.sha256(current_bytes[0x8000:0x9000]).hexdigest() != expected_hash:
+            raise ValueError("当前分区与备份时不一致，禁止恢复；请先核对板卡分区布局")
+        if info.get("application_offset") != 65536 or app.stat().st_size != info.get("application_bytes"):
+            raise ValueError("应用备份偏移或长度无效，禁止恢复")
         segments = ["0x10000", str(app)]
         if info["initialized_empty_board"]:
             segments = ["0x0", str(boot), *segments]
@@ -516,4 +566,56 @@ class Jobs:
         output = self._run(job, [*base, "--after", "hard-reset", "write-flash", *segments], 900)
         if "Hash of data verified" not in output:
             raise RuntimeError("恢复未得到哈希校验确认")
-        self._save(job, flash_hash_verified=True, stage="应用已恢复；原NVS数据未改写")
+        self._save(
+            job,
+            flash_hash_verified=True,
+            stage=("已恢复安装前的空板快照" if info["initialized_empty_board"] else "应用已恢复；原NVS数据未改写"),
+        )
+
+    def _open_player(self, job, port, expected_mac):
+        from .player import Player
+
+        if port not in {p["port"] for p in ports()}:
+            raise ValueError("请选择当前已连接的COM口")
+        if os.name != "nt" and shutil.which("lsof"):
+            busy = subprocess.run(["lsof", "-t", port], capture_output=True, text=True)
+            if busy.stdout.strip():
+                raise ValueError("COM串口被其他程序占用")
+        self._save(job, stage="核对播放器与板卡；USB/HID必须已断开", port=port, board_mac=expected_mac)
+        return Player(port, expected_mac)
+
+    def _upload(self, job, project, port, expected_mac):
+        from .player import encode_recording
+
+        payload = encode_recording(project)
+        folder = self.store.jobs / job["id"]
+        (folder / "recording.amr").write_bytes(payload)
+        atomic_json(folder / "project.json", project.model_dump())
+        player = self._open_player(job, port, expected_mac)
+        try:
+            old = player.read_recording(player.info)
+            if old:
+                (folder / "previous.amr").write_bytes(old)
+            self._save(job, stage="上传录制数据并逐字节读回校验；不改固件", previous_recording=bool(old))
+            meta = player.upload(payload)
+            self._save(
+                job,
+                recording=meta,
+                project_id=project.id,
+                armed=False,
+                stage="录制已上传并校验，保持待机；明确启用后再插USB/HID",
+            )
+        finally:
+            player.close()
+
+    def _player_control(self, job, project, port, expected_mac, command):
+        from .player import encode_recording, validate_recording
+
+        payload = encode_recording(project) if command == "arm" and project else None
+        crc = validate_recording(payload)["crc"] if payload else ""
+        player = self._open_player(job, port, expected_mac)
+        try:
+            reply = player.control(command, crc, payload)
+            self._save(job, player=reply, command=command, stage="播放器操作已确认")
+        finally:
+            player.close()

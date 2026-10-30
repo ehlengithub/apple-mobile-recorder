@@ -1,6 +1,6 @@
 {
   "date": "2026-10-30",
-  "python_tests": 171,
+  "python_tests": 206,
   "cpp_scheduler": "passed",
   "javascript_syntax": "passed",
   "shell_syntax": "passed",
@@ -13,7 +13,9 @@
     "block stale build after edits",
     "restore browser storage and project timing"
   ],
-  "firmware_builds": {
+  "physical_flash_performed_for_new_repository": false,
+  "new_iphone_hardware_acceptance": false,
+  "baseline_v1_firmware_builds": {
     "iphone": {
       "status": "succeeded",
       "schema_version": 1,
@@ -68,6 +70,58 @@
       "contains_network_credentials": true
     }
   },
-  "physical_flash_performed_for_new_repository": false,
-  "new_iphone_hardware_acceptance": false
+  "verification_round": "universal-player-v2",
+  "javascript_ui_tests": 14,
+  "v2_ui_test_method": "isolated Node VM DOM/fetch mocks; no user browser touched",
+  "v2_cpp": {
+    "asan_ubsan": "passed",
+    "format_mutations": 6000,
+    "serial_byte_streams": 4000,
+    "storage_failure_and_power_cut_model": "passed",
+    "timing": "unchanged ReplayEngine 350/60/90ms, minimum500ms"
+  },
+  "v2_native_integration": "real Python encoding/transport against native C++ firmware parser/store: 1 and 256 steps, upload/readback/arm/desktop/reupload",
+  "firmware_builds": {
+    "universal_offline": {
+      "schema_version": 1,
+      "mode": "offline",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "application_offset": 65536,
+      "application_file": "UniversalPlayer.ino.bin",
+      "application_sha256": "0650eaca78dcea8f8da779b258e8b0f0647043b9b61fe559f3fd07670a182e85",
+      "bytes": 395824,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "contains_network_credentials": false,
+      "recording_protocol": 2,
+      "status": "succeeded"
+    },
+    "universal_wifi": {
+      "schema_version": 1,
+      "mode": "desktop",
+      "fqbn": "esp32:esp32:esp32s3:USBMode=default,CDCOnBoot=cdc,FlashSize=8M",
+      "application_offset": 65536,
+      "application_file": "UniversalPlayer.ino.bin",
+      "application_sha256": "0df6256eaea76721ea631358846b6de9ab27a58fcb2fa5a24901900fa63a68de",
+      "bytes": 965552,
+      "project_id": null,
+      "steps": 0,
+      "cycle_ms": 0,
+      "loops": null,
+      "startup_ms": null,
+      "contains_network_credentials": true,
+      "recording_protocol": 2,
+      "status": "succeeded"
+    }
+  },
+  "v2_hardware_upload_performed": false,
+  "v2_actual_page_acceptance": false,
+  "fixed_review_findings": [
+    "real Macro playback executes on ASGI event loop",
+    "restore reads current partition and refuses changed layout",
+    "persisted job history restores UI recovery path and retries transient polls"
+  ]
 }

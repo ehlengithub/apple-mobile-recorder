@@ -4,6 +4,7 @@ const $ = id => document.getElementById(id);
 let project = null, status = {}, currentBuild = null, activeJob = null, frameSeq = -1, lastFlash = null;
 let actionBusy = false, pollingJob = false, loadingFrame = false, saving = false;
 let buildSnapshot = null;
+let historyJobs = [], historyRequest = 0;
 function message(text) { $("message").textContent = text; $("message").hidden = false; clearTimeout(message.timer); message.timer = setTimeout(() => { $("message").hidden = true; }, 9000); }
 async function api(path, data, method = "POST") {
   const options = {method};
@@ -62,45 +63,90 @@ async function refresh() {
   $("tools").textContent = info.tools.arduino && info.tools.esptool ? "编译 / 烧录工具就绪" : "请先运行环境安装脚本";
   if(!$("host").value && info.lan_host)$("host").value=info.lan_host;
   $("device-port").value=String(info.device_port);$("device-port").readOnly=true;
-  $("empty").textContent=`先切换到录制模式固件，在目标设备的「屏幕镜像」中选择 ${info.airplay_name || "Apple Recorder"}`;
+  $("empty").textContent=`先切换到电脑录制模式，在目标设备的「屏幕镜像」中选择 ${info.airplay_name || "Apple Recorder"}`;
   if (info.frame && !project) { $("width").value=info.frame.width; $("height").value=info.frame.height; $("orientation").value=info.frame.height>info.frame.width?"portrait":"landscape"; }
+  await refreshHistory();
+}
+function historySelection() {
+  const job = historyJobs.find(item => item.id === $("job-history").value);
+  lastFlash = job?.kind === "flash" && job.backup_available ? job.id : null;
+  $("restore").disabled = !lastFlash || Boolean(activeJob) || historyJobs.some(item => item.running_here);
+  $("view-job").disabled = !job;
+  const names = {build:"生成固件",flash:"烧录",restore:"恢复",upload:"上传录制", "player-control":"播放器控制"};
+  const states = {queued:"排队",running:"执行中",succeeded:"完成",failed:"失败"};
+  if (!job) { $("history-detail").textContent="尚无任务。生成或烧录后，记录和可用备份会显示在这里。"; return; }
+  const pending = ["queued","running"].includes(job.status) && !job.running_here;
+  $("history-detail").textContent = `${names[job.kind] || job.kind} · ${pending ? "未确认结束，请核对任务日志" : states[job.status] || job.status} · ${job.id}${job.board_mac ? " · 板卡 "+job.board_mac : ""}${job.port ? " · "+job.port : ""}。${job.backup_available ? "烧录前备份文件齐全；恢复时还会核对备份和原板。" : job.backup_ready ? "备份文件不完整，无法恢复。" : "此任务没有可用的烧录前备份。"}`;
+}
+async function refreshHistory({select=null, resume=true} = {}) {
+  const request = ++historyRequest;
+  const items = await api("/api/studio/jobs",undefined,"GET");
+  if (request !== historyRequest) return;
+  historyJobs=items;
+  const previous = select || $("job-history").value;
+  const chosen = items.find(item=>item.id===previous) || items.find(item=>item.id===activeJob) || items.find(item=>item.backup_available) || items[0];
+  $("job-history").replaceChildren(new Option(items.length ? "请选择任务" : "暂无任务", ""));
+  const names = {build:"生成",flash:"烧录",restore:"恢复",upload:"上传录制", "player-control":"播放器控制"};
+  const states = {queued:"排队",running:"执行中",succeeded:"完成",failed:"失败"};
+  for (const job of items) {
+    const time = job.created ? new Date(job.created*1000).toLocaleString() : "时间未知";
+    $("job-history").add(new Option(`${time} · ${names[job.kind] || job.kind} · ${states[job.status] || job.status}${job.backup_available ? " · 有备份" : ""} · ${job.id.slice(0,8)}`,job.id));
+  }
+  if(chosen) $("job-history").value=chosen.id;
+  if (resume && !activeJob) {
+    const running=items.find(item=>item.running_here);
+    if(running) activeJob=running.id;
+  }
+  historySelection();
+  if(resume && activeJob) await pollJob();
+}
+function showJob(job) {
+  $("job-state").textContent = `${job.stage}${job.error ? "："+job.error : ""}`;
+  $("job-log").hidden=!job.log; $("job-log").textContent=job.log || "";
 }
 async function launchBuild(mode) {
-  if (mode === "offline") await save();
+  if (mode === "offline" && project) await save();
   buildSnapshot=mode === "offline"?editorSnapshot():null;
-  const body = {mode, project_id:mode === "offline" ? project.id : null};
-  if (mode === "desktop") body.network = {ssid:$("ssid").value, password:$("password").value, host:$("host").value, port:Number($("device-port").value)};
-  const job = await api("/api/studio/build",body); activeJob=job.id; currentBuild=null; $("flash").disabled=true; $("download").hidden=true;
-  if (mode === "desktop") $("password").value="";
+  const body = {mode, project_id:mode === "offline" && project ? project.id : null};
+  if (mode === "desktop" || $("ssid").value) body.network = {ssid:$("ssid").value, password:$("password").value, host:$("host").value, port:Number($("device-port").value)};
+  const job = await api("/api/studio/build",body); activeJob=job.id; currentBuild=null; $("flash").disabled=true; $("download").hidden=true; historySelection();
+  if (body.network) $("password").value="";
   await pollJob();
 }
 async function pollJob() {
   if (!activeJob || pollingJob) return;
+  const identity=activeJob;
   pollingJob=true;
   try {
-    const job = await api(`/api/studio/jobs/${activeJob}`,undefined,"GET");
-    $("job-state").textContent = `${job.stage}${job.error ? "："+job.error : ""}`;
-    $("job-log").hidden=!job.log; $("job-log").textContent=job.log || "";
+    const job = await api(`/api/studio/jobs/${identity}`,undefined,"GET");
+    if(activeJob !== identity) return;
+    showJob(job);
     if (job.status === "succeeded" || job.status === "failed") {
       activeJob=null;
-      if (job.kind === "flash" && job.backup_ready) { lastFlash=job.id;$("restore").hidden=false; }
+      await refreshHistory({select:job.kind === "flash" ? job.id : null,resume:false}).catch(e=>message(e.message));
       if (job.kind === "build" && job.status === "succeeded") {
-        if(job.manifest.mode === "offline" && buildSnapshot !== editorSnapshot()){
+        if(job.manifest.recording_protocol !== 2 && job.manifest.project_id && (!project || buildSnapshot !== editorSnapshot())){
           invalidateBuild();$("job-state").textContent="生成期间参数已改变，请保存后重新生成，旧固件不会被当作新参数烧录。";return;
         }
         currentBuild=job.id; $("flash").disabled=false; $("download").hidden=false; $("download").href=`/api/studio/jobs/${job.id}/application.bin`;
         $("download").textContent="下载固件";
-        $("firmware-summary").hidden=false;$("firmware-summary").textContent=job.manifest.mode === "offline"?`${job.manifest.steps}步 · 每轮${(job.manifest.cycle_ms/1000).toFixed(3)}秒 · ${job.manifest.loops || "无限"}轮 · SHA256 ${job.manifest.application_sha256.slice(0,12)}…`:`录制模式 · SHA256 ${job.manifest.application_sha256.slice(0,12)}…`;
-        $("job-state").textContent=`已生成${job.manifest.mode === "offline" ? "离线" : "录制模式"}固件。核对COM口后再烧录。`;
+        $("firmware-summary").hidden=false;$("firmware-summary").textContent=job.manifest.recording_protocol === 2?`通用播放器 v2 · 录制单独上传 · SHA256 ${job.manifest.application_sha256.slice(0,12)}…`:job.manifest.mode === "offline" || job.manifest.mode === "legacy-offline"?`${job.manifest.steps}步 · 每轮${(job.manifest.cycle_ms/1000).toFixed(3)}秒 · ${job.manifest.loops || "无限"}轮 · SHA256 ${job.manifest.application_sha256.slice(0,12)}…`:`录制模式 · SHA256 ${job.manifest.application_sha256.slice(0,12)}…`;
+        $("job-state").textContent=job.manifest.recording_protocol === 2?"已生成通用播放器 v2。录制单独上传，修改录制无需重新编译固件；核对COM口后再烧录。":`已生成${job.manifest.mode === "offline" || job.manifest.mode === "legacy-offline" ? "离线" : "录制模式"}固件。核对COM口后再烧录。`;
       } else if (job.kind === "flash" && job.status === "succeeded") {
-        lastFlash=job.id;$("restore").hidden=false;
-        $("job-state").textContent="烧录和哈希校验成功，应用已备份。离线固件保持首次待机：保持COM供电，重插USB/HID后启用。";
+        $("job-state").textContent="烧录和哈希校验成功，烧录前备份可在任务历史中选择恢复。";
+      } else if (job.kind === "upload" && job.status === "succeeded") {
+        $("job-state").textContent="上传并逐字节校验完成，保持待机；点启用后再插USB/HID。";
+      } else if (job.kind === "player-control" && job.status === "succeeded") {
+        $("job-state").textContent=job.command === "arm"?"录制已启用；现在插入USB/HID，按录制的倒计时开始执行。":job.command === "desktop"?"已切换录制模式，可以插入USB/HID并连接电脑录制。":"播放器已停止并保持待机。";
       }
     }
-  } catch(e) { message(e.message); activeJob=null; }
+  } catch(e) { $("job-state").textContent=`任务状态暂时无法读取，将自动重试：${e.message}`; }
   finally { pollingJob=false; }
 }
-on("refresh",refresh); on("save",async()=>{await save();message("参数已保存，下次生成会使用新参数");await refresh();});
+on("refresh-history",()=>refreshHistory());
+$("job-history").addEventListener("change",historySelection);
+on("view-job",async()=>{const identity=$("job-history").value;if(identity)showJob(await api(`/api/studio/jobs/${identity}`,undefined,"GET"));});
+on("refresh",refresh); on("save",async()=>{await save();message("参数已保存，下次上传会使用新参数");await refresh();});
 on("record",async()=>{
   const recording=Boolean(status.macro?.recording);
   if (!recording && !canRecord()) throw new Error("请检查录制模式、投屏和设备画面尺寸；必须使用绝对定位");
@@ -121,9 +167,9 @@ on("build",()=>launchBuild("offline"));on("build-desktop",()=>launchBuild("deskt
 on("flash",async()=>{
   if (!currentBuild || !$("port").value) throw new Error("请先生成固件，再明确选择ESP32的COM口");
   const job=await api("/api/studio/flash",{build_id:currentBuild,port:$("port").value,initialize:$("initialize").checked});
-  activeJob=job.id;$("flash").disabled=true;await pollJob();
+  activeJob=job.id;$("flash").disabled=true;historySelection();await pollJob();
 });
-on("restore",async()=>{if(!lastFlash || !$("port").value)throw new Error("请选择原来的COM口");const job=await api("/api/studio/restore",{flash_id:lastFlash,port:$("port").value});activeJob=job.id;await pollJob();});
+on("restore",async()=>{if(activeJob)throw new Error("请等待当前任务结束");if(!lastFlash || !$("port").value)throw new Error("请选择带备份的烧录任务和原板COM口");const job=await api("/api/studio/restore",{flash_id:lastFlash,port:$("port").value});activeJob=job.id;historySelection();await pollJob();});
 for(const id of ["name","loops","startup"]) $(id).addEventListener("input",invalidateBuild);
 on("fullscreen",()=>$("stage").requestFullscreen());
 on("export",async()=>{const p=await save();const url=URL.createObjectURL(new Blob([JSON.stringify(p,null,2)],{type:"application/json"}));const a=document.createElement("a");a.href=url;a.download=`${p.id}.json`;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);});
